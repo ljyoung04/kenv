@@ -1,3 +1,4 @@
+wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.16.7.tar.xz
 
 ../../scripts/create-image.sh -d bookworm -s 20480 -a arm64
 ../../scripts/create-image.sh -d bookworm -s 20480 -a amd64
