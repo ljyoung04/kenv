@@ -1,0 +1,3 @@
+
+../../scripts/create-image.sh -d bookworm -s 20480 -a arm64
+../../scripts/create-image.sh -d bookworm -s 20480 -a amd64

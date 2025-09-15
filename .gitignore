@@ -1,0 +1,30 @@
+# kernels: keep dir, ignore everything inside
+/kernels/*
+!/kernels/.gitkeep
+
+# images: keep top-level and key sub-arches, ignore their contents
+/images/*
+!/images/.gitkeep
+!/images/arm64/
+!/images/x86/
+/images/arm64/*
+!/images/arm64/.gitkeep
+/images/x86/*
+!/images/x86/.gitkeep
+
+# android workspace: keep dir skeleton only
+/android/*
+!/android/.gitkeep
+
+# Common large artifacts
+*.tar.gz
+*.tar.xz
+*.zip
+*.img
+*.iso
+
+# Generic build/cache outputs anywhere
+**/build/**
+**/out/**
+**/tmp/**
+**/.cache/**
