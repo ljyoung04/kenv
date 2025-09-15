@@ -2,9 +2,8 @@
 /kernels/*
 !/kernels/.gitkeep
 
-# images: keep top-level and key sub-arches, ignore their contents
+# images: keep dir skeletons, ignore contents
 /images/*
-!/images/.gitkeep
 !/images/arm64/
 !/images/x86/
 /images/arm64/*
