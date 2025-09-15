@@ -36,8 +36,8 @@ _ARCH="$ARCH"
 unset ARCH
 export ARCH="$_ARCH"
 
-if [ "$ARCH" == "amd64" ]; then
-    export IMAGE="$PRJ/images/amd64"
+if [ "$ARCH" == "amd64" ] || [ "$ARCH" == "x86_64" ]; then
+    export IMAGE="$PRJ/images/x64"
 elif [ "$ARCH" == "arm64" ]; then
     export IMAGE="$PRJ/images/arm64"
 else

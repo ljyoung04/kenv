@@ -11,9 +11,9 @@
 /images/x86/*
 !/images/x86/.gitkeep
 
-# android workspace: keep dir skeleton only
-/android/*
-!/android/.gitkeep
+# androids workspace: keep dir skeleton only
+/androids/*
+!/androids/.gitkeep
 
 # Common large artifacts
 *.tar.gz
