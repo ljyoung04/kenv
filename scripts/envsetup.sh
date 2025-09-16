@@ -22,7 +22,6 @@ export SSH_PORT=20202
 unset _READY
 source "$SCRIPT_DIR/.common.sh"
 
-export DEF_KVER="6.6"
 export DEF_ARCH="arm64"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -52,9 +51,8 @@ export PATCH="$PRJ/patch"
 # commands
 
 function current() {
-    CMD="ARCH=$ARCH KVER=$KVER KSRC=$KSRC KOBJ=$KOBJ source $SCRIPT_DIR/envsetup.sh"
+    CMD="ARCH=$ARCH KSRC=$KSRC KOBJ=$KOBJ source $SCRIPT_DIR/envsetup.sh"
     info "ARCH: $ARCH"
-    info "KVER: $KVER"
     info "KSRC: $KSRC"
     info "KOBJ: $KOBJ"
     info "$CMD"
@@ -77,22 +75,11 @@ function force_export() {
 
 function print_info() {    
     info "ARCH: $ARCH"
-    info "KVER: $KVER"
     info "KSRC: $KSRC"
     info "KOBJ: $KOBJ"
     info "IMAGE: $IMAGE"
     info "SHARE: $SHARE"
 }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 2) KVER 설정 (기존 로직 그대로)
-# ──────────────────────────────────────────────────────────────────────────────
-if [ -z "$KVER" ] || [ "$KVER" == "" ]; then
-    KVER="$DEF_KVER"
-fi
-
-force_export "KVER" "$KVER"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3) KSRC Override 로직 (Priority: 새로 넘어온 SRC > 기존 KSRC)
@@ -136,7 +123,7 @@ fi
 # 5) 최종 상태 출력 및 디렉토리 생성 (기존 로직 그대로)
 # ──────────────────────────────────────────────────────────────────────────────
 
-print_info
+current
 
 if [ ! -d "$KOBJ" ]; then
     mkdir -p "$KOBJ"
