@@ -18,6 +18,7 @@ fi
 export SCRIPT_DIR="$(realpath "$(dirname "$_SCRIPT_SOURCE")")"
 export PRJ="$(dirname "$SCRIPT_DIR")"
 export SSH_PORT=20202
+export FILEPATH_ENV="$HOME/.linux.env"
 
 unset _READY
 source "$SCRIPT_DIR/.common.sh"
@@ -57,6 +58,7 @@ function current() {
     info "KOBJ: $KOBJ"
     info "$CMD"
     info "Try to copy to clipboard..."
+    echo "$CMD" >| "$FILEPATH_ENV"
     echo "$CMD" | clip
 }
 
