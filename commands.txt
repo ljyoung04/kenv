@@ -1,11 +1,19 @@
-wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.16.7.tar.xz
+wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.98.tar.xz
+ARCH=x86_64 SRC=linux-6.6.98 OBJ=debug source scripts/envsetup.sh
 
-../../scripts/create-image.sh -d bookworm -s 20480 -a arm64
-../../scripts/create-image.sh -d bookworm -s 20480 -a amd64
+ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ defconfig
+ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ kvm_guest.config
 
-ARCH=x86_64 SRC=linux-6.16.7 OBJ=debug source scripts/envsetup.sh
+cat $PRJ/configs/base_config >> $KOBJ/.config
 ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ olddefconfig
+
 ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ -j`nproc` >/dev/null
 ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ scripts_gdb
 
+
 $KSRC/scripts/clang-tools/gen_compile_commands.py -d $KOBJ -o $KSRC/compile_commands.json
+
+# File system image
+
+../../scripts/create-image.sh -d bookworm -s 20480 -a arm64
+../../scripts/create-image.sh -d bookworm -s 20480 -a amd64
