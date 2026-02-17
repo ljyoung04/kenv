@@ -11,6 +11,10 @@
 /images/x86/*
 !/images/x86/.gitkeep
 
+# share: keep dir, ignore everything inside
+/share/*
+!/share/.gitkeep
+
 # androids workspace: keep dir skeleton only
 /androids/*
 !/androids/.gitkeep
