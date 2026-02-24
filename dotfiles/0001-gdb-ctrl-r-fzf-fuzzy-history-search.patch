@@ -1,0 +1,157 @@
+diff --git a/gdb/top.c b/gdb/top.c
+index b34f291f0e6..00a370286d8 100644
+--- a/gdb/top.c
++++ b/gdb/top.c
+@@ -66,6 +66,7 @@
+ #undef savestring
+ 
+ #include <sys/types.h>
++#include <sys/wait.h>
+ 
+ #include "event-top.h"
+ #include <sys/stat.h>
+@@ -1091,6 +1092,132 @@ gdb_rl_operate_and_get_next (int count, int key)
+   return rl_newline (1, key);
+ }
+ 
++/* Ctrl+R handler: launch fzf for fuzzy history search.
++   Falls back to readline's reverse-search-history if fzf is not available.  */
++
++static int
++gdb_rl_fzf_history_search (int count, int key)
++{
++  HIST_ENTRY **hist = history_list ();
++  if (hist == NULL)
++    return 0;
++
++  /* Count history entries and collect unique lines (most recent wins).  */
++  int hist_len = 0;
++  while (hist[hist_len] != NULL)
++    hist_len++;
++
++  if (hist_len == 0)
++    return 0;
++
++  /* Create two pipes: one for feeding history to fzf's stdin,
++     one for reading fzf's selected output.  */
++  int pipe_to_fzf[2];
++  int pipe_from_fzf[2];
++
++  if (pipe (pipe_to_fzf) < 0 || pipe (pipe_from_fzf) < 0)
++    return rl_reverse_search_history (count, key);
++
++  /* Temporarily give terminal control to fzf.  */
++  rl_deprep_terminal ();
++
++  pid_t pid = fork ();
++  if (pid < 0)
++    {
++      /* Fork failed, close pipes and fallback.  */
++      close (pipe_to_fzf[0]);
++      close (pipe_to_fzf[1]);
++      close (pipe_from_fzf[0]);
++      close (pipe_from_fzf[1]);
++      rl_prep_terminal (0);
++      return rl_reverse_search_history (count, key);
++    }
++
++  if (pid == 0)
++    {
++      /* Child process: set up pipes and exec fzf.  */
++      close (pipe_to_fzf[1]);
++      close (pipe_from_fzf[0]);
++
++      dup2 (pipe_to_fzf[0], STDIN_FILENO);
++      dup2 (pipe_from_fzf[1], STDOUT_FILENO);
++
++      close (pipe_to_fzf[0]);
++      close (pipe_from_fzf[1]);
++
++      execlp ("fzf", "fzf",
++	      "--height=40%", "--reverse", "--no-sort", "--tac",
++	      "--prompt=gdb history> ",
++	      (char *) NULL);
++
++      /* If execlp fails (fzf not found), exit immediately.  */
++      _exit (127);
++    }
++
++  /* Parent process.  */
++  close (pipe_to_fzf[0]);
++  close (pipe_from_fzf[1]);
++
++  /* Write history to fzf's stdin, deduplicating entries.
++     Walk from oldest to newest; later (newer) duplicates overwrite older
++     ones in the set, and fzf --tac reverses the display order.  */
++  {
++    /* Simple dedup: track seen lines with a basic linear scan.
++       For typical GDB history sizes this is fine.  */
++    std::vector<std::string> unique_lines;
++    for (int i = 0; i < hist_len; i++)
++      {
++	const char *line = hist[i]->line;
++	bool found = false;
++	for (size_t j = 0; j < unique_lines.size (); j++)
++	  {
++	    if (unique_lines[j] == line)
++	      {
++		/* Move to end (newest position).  */
++		unique_lines.erase (unique_lines.begin () + j);
++		unique_lines.push_back (line);
++		found = true;
++		break;
++	      }
++	  }
++	if (!found)
++	  unique_lines.push_back (line);
++      }
++
++    for (const auto &l : unique_lines)
++      {
++	write (pipe_to_fzf[1], l.c_str (), l.size ());
++	write (pipe_to_fzf[1], "\n", 1);
++      }
++  }
++  close (pipe_to_fzf[1]);
++
++  /* Read selected line from fzf's stdout.  */
++  char buf[4096];
++  ssize_t n = read (pipe_from_fzf[0], buf, sizeof (buf) - 1);
++  close (pipe_from_fzf[0]);
++
++  int status;
++  waitpid (pid, &status, 0);
++
++  /* Restore terminal for readline.  */
++  rl_prep_terminal (0);
++
++  if (n > 0)
++    {
++      /* Strip trailing newline.  */
++      if (buf[n - 1] == '\n')
++	n--;
++      buf[n] = '\0';
++
++      rl_replace_line (buf, 0);
++      rl_point = rl_end;
++    }
++
++  rl_forced_update_display ();
++  return 0;
++}
++
+ /* Number of user commands executed during this session.  */
+ 
+ static int command_count = 0;
+@@ -2166,6 +2293,11 @@ init_main (void)
+      15 is Control-o, the same binding this function has in Bash.  */
+   rl_add_defun ("operate-and-get-next", gdb_rl_operate_and_get_next, 15);
+ 
++  /* Bind Ctrl+R to fzf-based fuzzy history search.
++     '\022' is Ctrl+R (0x12).  Falls back to reverse-search-history
++     if fzf is not available.  */
++  rl_add_defun ("fzf-history-search", gdb_rl_fzf_history_search, '\022');
++
+   add_setshow_string_cmd ("prompt", class_support,
+ 			  &top_prompt,
+ 			  _("Set gdb's prompt."),

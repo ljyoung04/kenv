@@ -15,18 +15,22 @@ if [[ "$_SCRIPT_SOURCE" == "$0" ]]; then
     return 1
 fi
 
-export SCRIPT_DIR="$(realpath "$(dirname "$_SCRIPT_SOURCE")")"
-export PRJ="$(dirname "$SCRIPT_DIR")"
-export SSH_PORT=20202
+export SCRIPTS="$(realpath "$(dirname "$_SCRIPT_SOURCE")")"
+export PRJ="$(dirname "$SCRIPTS")"
 export FILEPATH_ENV="$HOME/.linux.env"
 
 unset _READY
-source "$SCRIPT_DIR/.common.sh"
+source "$SCRIPTS/.common.sh"
 
-export DEF_ARCH="arm64"
+export DEF_ARCH="x86_64"
+export DEF_CC="llvm-19"
+export DEF_SSH_PORT=20202
+export DEF_GDB_PORT=1245
+export IMAGES="$PRJ/images"
+export CONFIGS="$PRJ/configs"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) ARCH 설정 (기존 로직 그대로)
+# 1) ARCH setup
 # ──────────────────────────────────────────────────────────────────────────────
 if [ -z "$ARCH" ] || [ "$ARCH" == "" ]; then
     ARCH="$DEF_ARCH"
@@ -36,93 +40,167 @@ _ARCH="$ARCH"
 unset ARCH
 export ARCH="$_ARCH"
 
-if [ "$ARCH" == "amd64" ] || [ "$ARCH" == "x86_64" ]; then
-    export IMAGE="$PRJ/images/x64"
-elif [ "$ARCH" == "arm64" ]; then
-    export IMAGE="$PRJ/images/arm64"
-else
+if [ "$ARCH" != "amd64" ] && [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "arm64" ]; then
     error "Error: ARCH not supported: $ARCH"
     return 1
 fi
 
 export SHARE="$PRJ/share"
+export RANDOMS="$PRJ/randoms"
 export SYZKALLER="$PRJ/syzkaller"
-export PATCH="$PRJ/patch"
+export PATCHES="$PRJ/patches"
 
 # commands
 
 function current() {
-    CMD="ARCH=$ARCH KSRC=$KSRC KOBJ=$KOBJ source $SCRIPT_DIR/envsetup.sh"
-    info "ARCH: $ARCH"
-    info "KSRC: $KSRC"
-    info "KOBJ: $KOBJ"
+    CMD="ARCH=$ARCH CC=$CC KSRC=$KSRC KOBJ=$KOBJ FS=$FS SSH_PORT=$SSH_PORT GDB_PORT=$GDB_PORT source $SCRIPTS/envsetup.sh"
+    info "ARCH:     $ARCH"
+    info "CC:       $CC"
+    info "KSRC:     $KSRC"
+    info "KOBJ:     $KOBJ"
+    info "FS:       $FS"
+    info "SSH_PORT: $SSH_PORT"
+    info "GDB_PORT: $GDB_PORT"
     info "$CMD"
-    info "Try to copy to clipboard..."
-    echo "$CMD" >| "$FILEPATH_ENV"
-    echo "$CMD" | clip
+    warn "Run 'source ~/$(basename "$FILEPATH_ENV")' to restore this environment"
+    echo "current_reset" >| "$FILEPATH_ENV"
+    echo "$CMD" >> "$FILEPATH_ENV"
+    # echo "$CMD" | clip
 }
 
 function force_export() {
-    local var_name="$1"      # 첫 번째 인자: 환경변수 이름
-    local new_value="$2"     # 두 번째 인자: 새로운 값
-    local temp_var="_${var_name}"  # 임시 변수명 생성
-    
-    # 1. 현재 값을 임시 변수에 저장
+    local var_name="$1"
+    local new_value="$2"
+    local temp_var="_${var_name}"
+
     eval "${temp_var}=\"${new_value}\""
-    # 2. 원본 변수 제거
     unset "$var_name"
-    # 3. 새 값으로 export
     eval "export ${var_name}=\"\$${temp_var}\""
 }
 
-function print_info() {    
-    info "ARCH: $ARCH"
-    info "KSRC: $KSRC"
-    info "KOBJ: $KOBJ"
-    info "IMAGE: $IMAGE"
-    info "SHARE: $SHARE"
+function print_info() {
+    info "ARCH:     $ARCH"
+    info "CC:       $CC"
+    info "KSRC:     $KSRC"
+    info "KOBJ:     $KOBJ"
+    info "FS:       $FS"
+    info "SSH_PORT: $SSH_PORT"
+    info "GDB_PORT: $GDB_PORT"
+    info "SHARE:    $SHARE"
+}
+
+function current_reset() {
+    unset SCRIPTS PRJ FILEPATH_ENV
+    unset DEF_ARCH DEF_CC DEF_SSH_PORT DEF_GDB_PORT IMAGES RANDOM
+    unset ARCH SHARE TMP SYZKALLER PATCH
+    unset KSRC KOBJ FS CC LLVM CROSS_COMPILE SSH_PORT GDB_PORT
+    unset _READY
+    info "All environment variables have been reset."
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3) KSRC Override 로직 (Priority: 새로 넘어온 SRC > 기존 KSRC)
+# 3) KSRC override (SRC > KSRC)
 # ──────────────────────────────────────────────────────────────────────────────
 if [ -n "$SRC" ] && [ "$SRC" != "" ]; then
-    # 3-1) 사용자가 새로 SRC=값 을 준 경우 → 무조건 이쪽이 우선
+    # New SRC takes priority
     force_export "KSRC" "$PRJ/kernels/$SRC"
     unset SRC
 else
-    # 3-2) 사용자가 SRC 를 주지 않았다면, 외부에서 이미 KSRC 환경변수로 설정된 게 있는지 확인
     if [ -n "$KSRC" ] && [ "$KSRC" != "" ]; then
-        # 외부 KSRC 가 있으면 그대로 사용
+        # Keep existing KSRC
         force_export "KSRC" "$KSRC"
     else
-        # SRC 도 없고, 외부 KSRC 도 없으면 에러
         error "Error: SRC/KSRC not set"
         return 1
     fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) KOBJ Override 로직 - KSRC 하위 build 디렉토리로 변경
+# 4) KOBJ override (OBJ > KOBJ) - build dir under KSRC
 # ──────────────────────────────────────────────────────────────────────────────
 if [ -n "$OBJ" ] && [ "$OBJ" != "" ]; then
-    # 4-1) 사용자가 새로 OBJ=값 을 준 경우 → KSRC/build/OBJ 로 설정
+    # New OBJ takes priority
     force_export "KOBJ" "$KSRC/build/$OBJ"
     unset OBJ
 else
-    # 4-2) 사용자가 OBJ 주지 않았다면, 외부에서 이미 KOBJ 환경변수로 설정된 게 있는지 확인
     if [ -n "$KOBJ" ] && [ "$KOBJ" != "" ]; then
-        # 외부 KOBJ 가 있으면 그대로 사용
+        # Keep existing KOBJ
         force_export "KOBJ" "$KOBJ"
     else
-        # OBJ 도 없고, 외부 KOBJ 도 없으면 에러
         error "Error: OBJ/KOBJ not set"
         return 1
     fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5) 최종 상태 출력 및 디렉토리 생성 (기존 로직 그대로)
+# 5) FS override (FS > default by ARCH)
+# ──────────────────────────────────────────────────────────────────────────────
+if [ -n "$FS" ] && [ "$FS" != "" ]; then
+    force_export "FS" "$FS"
+else
+    # Default: determined by ARCH
+    if [ "$ARCH" == "amd64" ] || [ "$ARCH" == "x86_64" ]; then
+        force_export "FS" "$IMAGES/x64"
+    elif [ "$ARCH" == "arm64" ]; then
+        force_export "FS" "$IMAGES/arm64"
+    fi
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 6) SSH_PORT override
+# ──────────────────────────────────────────────────────────────────────────────
+if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "" ]; then
+    force_export "SSH_PORT" "$SSH_PORT"
+else
+    force_export "SSH_PORT" "$DEF_SSH_PORT"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7) GDB_PORT override
+# ──────────────────────────────────────────────────────────────────────────────
+if [ -n "$GDB_PORT" ] && [ "$GDB_PORT" != "" ]; then
+    force_export "GDB_PORT" "$GDB_PORT"
+else
+    force_export "GDB_PORT" "$DEF_GDB_PORT"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8) CC override (CC > default: llvm-19)
+#    CC=llvm-19  → LLVM=-19 (full LLVM toolchain with version suffix)
+#    CC=llvm     → LLVM=1   (full LLVM toolchain, no version suffix)
+#    CC=gcc      → CROSS_COMPILE set by ARCH for cross-compilation
+# ──────────────────────────────────────────────────────────────────────────────
+if [ -z "$CC" ] || [ "$CC" == "" ]; then
+    CC="$DEF_CC"
+fi
+force_export "CC" "$CC"
+
+# Reset previous toolchain variables
+unset LLVM CROSS_COMPILE
+
+case "$CC" in
+    llvm-*)
+        # e.g. llvm-19 → LLVM=-19
+        _llvm_suffix="${CC#llvm}"
+        export LLVM="$_llvm_suffix"
+        unset _llvm_suffix
+        ;;
+    llvm)
+        export LLVM=1
+        ;;
+    gcc)
+        if [ "$ARCH" == "arm64" ]; then
+            export CROSS_COMPILE="aarch64-linux-gnu-"
+        fi
+        ;;
+    *)
+        error "Error: CC not supported: $CC (use llvm-19, llvm, or gcc)"
+        return 1
+        ;;
+esac
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 9) Final output and directory setup
 # ──────────────────────────────────────────────────────────────────────────────
 
 current

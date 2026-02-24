@@ -1,0 +1,15 @@
+services:
+  kernel-dev:
+    build: .
+    container_name: linux-env
+    environment:
+      - HOST_UID=${HOST_UID}
+      - HOST_GID=${HOST_GID}
+    ports:
+      - "${SSH_PORT:-2222}:22"
+    volumes:
+      - .:/workspace
+    stdin_open: true
+    tty: true
+    privileged: true  # Required for debootstrap, mount, loopback devices
+    working_dir: /workspace

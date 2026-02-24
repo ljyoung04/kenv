@@ -26,6 +26,9 @@
 *.img
 *.iso
 
+# Docker user-specific env
+.env
+
 # Generic build/cache outputs anywhere
 **/build/**
 **/out/**
