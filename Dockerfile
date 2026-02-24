@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y \
     # debootstrap & image creation
     debootstrap \
     qemu-user-static \
+    qemu-system-x86 \
     e2fsprogs \
     sudo \
     openssh-client \
