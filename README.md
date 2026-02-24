@@ -58,8 +58,84 @@ cd /workspace
 wget -qO- https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.71.tar.xz | tar xJf - -C kernels/
 
 SRC=linux-6.12.71 OBJ=debug source scripts/envsetup.sh
-make -C $KSRC O=$KOBJ defconfig
+cp $CONFIGS/kernelctf.config $KOBJ/.config
+make -C $KSRC O=$KOBJ olddefconfig
 make -C $KSRC O=$KOBJ -j$(nproc)
+make -C $KSRC O=$KOBJ scripts_gdb
+$KSRC/scripts/clang-tools/gen_compile_commands.py -d $KOBJ -o $KSRC/compile_commands.json
+
+```
+
+### Filesystem Images
+
+Create and manage root filesystem images for QEMU VMs.
+
+```bash
+# Create an x86_64 image (inside the container)
+../../scripts/create-image.sh -d bookworm -s 20480 -a amd64
+# → images/x64/bookworm.img
+
+# Create an arm64 image
+../../scripts/create-image.sh -d bookworm -s 20480 -a arm64
+# → images/arm64/bookworm.img
+```
+
+Use `mkfs` to create new images easily:
+
+```bash
+# Create a default x86_64 image (5G, bookworm)
+$ mkfs compsec
+[*] Creating filesystem image: images/compsec/
+[*] Arch: x86_64, Distro: bookworm, Size: 5120MB
+...
+[*] Cleaning up debootstrap directory...
+[*] Created: images/compsec/bookworm.img (5.0G)
+[*] FS: /workspace/images/compsec
+```
+
+Multiple images can coexist under `images/`. Use `lsfs` and `setfs` to manage them:
+
+```bash
+# List available images and their status
+$ lsfs
+  [x64] bookworm.img (2.0G)
+* [compsec] bookworm.img (2.0G)
+  [aarch64] bookworm.img (2.0G)
+
+# Select a filesystem image
+$ setfs compsec
+[*] FS: /workspace/images/compsec
+```
+
+FS is independent from kernel setup — you can build a kernel without setting FS, and switch FS freely between VM runs:
+
+```bash
+# Setup kernel only (no FS needed for build)
+SRC=linux-6.12.71 OBJ=debug source scripts/envsetup.sh
+
+# Build kernel
+make -C $KSRC O=$KOBJ -j$(nproc)
+
+# Pick an image and run
+setfs compsec
+$SCRIPTS/run-vm.sh -s # Launch VM with shared directory
+```
+
+### Guest Workflow
+
+```bash
+# SSH into the VM
+ssh -p $SSH_PORT -i $FS/bookworm.id_rsa root@localhost
+
+# SCP files to the VM
+scp -P $SSH_PORT -i $FS/bookworm.id_rsa scripts/tracer.sh root@localhost:/root/
+
+# Mount shared directory (host $SHARE ↔ guest /mnt)
+mount -t 9p -o trans=virtio host_share /mnt
+
+# Load ftrace helpers and see available commands
+source /mnt/tracer.sh
+thelp
 ```
 
 ### Stop

@@ -98,6 +98,169 @@ function current_reset() {
     info "All environment variables have been reset."
 }
 
+function lsfs() {
+    local img_dir="$IMAGES"
+    if [ ! -d "$img_dir" ]; then
+        error "Images directory not found: $img_dir"
+        return 1
+    fi
+
+    local found=0
+    local current_name=""
+    if [ -n "$FS" ] && [ "$FS" != "" ]; then
+        current_name="$(basename "$FS")"
+    fi
+
+    for dir in "$img_dir"/*/; do
+        [ -d "$dir" ] || continue
+        local name="$(basename "$dir")"
+        local img="$dir/bookworm.img"
+        if [ -f "$img" ]; then
+            found=1
+            local size
+            size=$(du --apparent-size -h "$img" 2>/dev/null | cut -f1)
+            local marker="  "
+            if [ "$name" = "$current_name" ]; then
+                marker="* "
+            fi
+            local status=""
+            if fuser "$img" >/dev/null 2>&1; then
+                status=" [IN USE]"
+            fi
+            printf "%s[%s] bookworm.img (%s)%s\n" "$marker" "$name" "$size" "$status"
+        fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+        warn "No bookworm.img found under $img_dir"
+    fi
+
+    if [ -z "$current_name" ]; then
+        echo ""
+        warn "FS not set"
+    fi
+}
+
+function setfs() {
+    if [ -z "$1" ]; then
+        error "Usage: setfs <name>"
+        error "  e.g. setfs x64"
+        return 1
+    fi
+
+    local target="$IMAGES/$1"
+    if [ ! -d "$target" ]; then
+        error "Directory not found: $target"
+        lsfs
+        return 1
+    fi
+
+    force_export "FS" "$target"
+    info "FS: $FS"
+}
+
+function mkfs() {
+    local name=""
+    local arch="$ARCH"
+    local size=5120
+    local distro="bookworm"
+
+    # Help / no-args
+    if [ $# -eq 0 ] || [[ "$1" == "-h" || "$1" == "--help" ]]; then
+        echo "Usage: mkfs <name> [-a arch] [-s size_MB] [-d distro]"
+        echo ""
+        echo "  <name>       Image directory name (required)"
+        echo "  -a, --arch   Architecture (default: \$ARCH=$ARCH)"
+        echo "  -s, --size   Image size in MB (default: 5120)"
+        echo "  -d, --distro Debian distribution (default: bookworm)"
+        echo ""
+        echo "Examples:"
+        echo "  mkfs myimg"
+        echo "  mkfs myimg -a arm64 -s 10240"
+        echo "  mkfs myimg -d bookworm -s 2048"
+        return 0
+    fi
+
+    # First arg must be the name (not an option)
+    if [[ "$1" == -* ]]; then
+        error "Usage: mkfs <name> [-a arch] [-s size_MB] [-d distro]"
+        return 1
+    fi
+
+    name="$1"
+    shift
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -a|--arch)   arch="$2"; shift 2 ;;
+            -s|--size)   size="$2"; shift 2 ;;
+            -d|--distro) distro="$2"; shift 2 ;;
+            -h|--help)
+                mkfs --help
+                return 0
+                ;;
+            *)
+                error "Unknown option: $1"
+                return 1
+                ;;
+        esac
+    done
+
+    local img_dir="$IMAGES/$name"
+    local img_file="$img_dir/$distro.img"
+
+    # Check if image already exists
+    if [ -f "$img_file" ]; then
+        error "Image already exists: $img_file"
+        return 1
+    fi
+
+    # Convert ARCH to create-image.sh expected format
+    local ci_arch="$arch"
+    case "$arch" in
+        arm64)  ci_arch="aarch64" ;;
+        amd64)  ci_arch="x86_64" ;;
+    esac
+
+    info "Creating filesystem image: images/$name/"
+    info "Arch: $ci_arch, Distro: $distro, Size: ${size}MB"
+
+    # Create directory
+    mkdir -p "$img_dir"
+
+    # Run create-image.sh from the image directory
+    local prev_dir="$PWD"
+    cd "$img_dir"
+    if ! sudo "$SCRIPTS/create-image.sh" -a "$ci_arch" -d "$distro" -s "$size"; then
+        cd "$prev_dir"
+        error "create-image.sh failed"
+        return 1
+    fi
+    cd "$prev_dir"
+
+    # Fix ownership (create-image.sh runs as root)
+    sudo chown "$(id -u):$(id -g)" "$img_dir"/*
+
+    # Clean up debootstrap directory
+    if [ -d "$img_dir/$distro" ]; then
+        info "Cleaning up debootstrap directory..."
+        sudo rm -rf "$img_dir/$distro"
+    fi
+
+    # Verify result
+    if [ ! -f "$img_file" ]; then
+        error "Image file not created: $img_file"
+        return 1
+    fi
+
+    local img_size
+    img_size=$(du -h "$img_file" 2>/dev/null | cut -f1)
+    info "Created: images/$name/$distro.img ($img_size)"
+
+    # Auto-select the new image
+    setfs "$name"
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 3) KSRC override (SRC > KSRC)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -133,17 +296,13 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5) FS override (FS > default by ARCH)
+# 5) FS override (optional - kernel build doesn't require FS)
 # ──────────────────────────────────────────────────────────────────────────────
 if [ -n "$FS" ] && [ "$FS" != "" ]; then
     force_export "FS" "$FS"
 else
-    # Default: determined by ARCH
-    if [ "$ARCH" == "amd64" ] || [ "$ARCH" == "x86_64" ]; then
-        force_export "FS" "$IMAGES/x64"
-    elif [ "$ARCH" == "arm64" ]; then
-        force_export "FS" "$IMAGES/arm64"
-    fi
+    force_export "FS" ""
+    warn "FS not set. Use 'setfs <name>' or 'lsfs' to manage filesystem images."
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -6,6 +6,30 @@ if [ -z "$_READY" ]; then
     exit 1
 fi
 
+# --- FS validation ---
+if [ -z "$FS" ] || [ "$FS" == "" ]; then
+    echo "[-] FS not set. Available filesystem images:"
+    echo ""
+    lsfs 2>/dev/null || ls -1d "$IMAGES"/*/ 2>/dev/null
+    echo ""
+    echo "[-] Use 'setfs <name>' to select a filesystem image, then re-run."
+    exit 1
+fi
+
+if [ ! -f "$FS/bookworm.img" ]; then
+    echo "[-] Image not found: $FS/bookworm.img"
+    exit 1
+fi
+
+if fuser "$FS/bookworm.img" >/dev/null 2>&1; then
+    echo "[!] WARNING: $FS/bookworm.img is in use by another process."
+    echo "[!] Running multiple QEMU instances on the same image may cause corruption."
+    read -p "Continue anyway? [y/N] " -r
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
 # --- Print environment variables ---
 echo "================================================="
 echo "KSRC:     $KSRC"
