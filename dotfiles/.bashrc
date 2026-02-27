@@ -8,7 +8,7 @@ esac
 # oh-my-bash
 # ──────────────────────────────────────────────────────────────────────────────
 export OSH='/opt/oh-my-bash'
-OSH_THEME="axin"
+OSH_THEME="demula"
 
 completions=(
   git
