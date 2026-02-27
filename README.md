@@ -43,9 +43,8 @@ Ready-to-use kernel build environment without host setup.
 
 ```bash
 # 1. Create .env (once)
-cp .env.example .env
-# If your UID/GID is not 1000, edit .env accordingly
-# Check: id -u && id -g
+./init.sh
+# Detects UID/GID automatically and picks an available SSH port (2000-3000)
 
 # 2. Build & start
 docker compose up -d
@@ -194,11 +193,13 @@ $ echo hello | clip
 
 ### `.env` Configuration
 
+Run `./init.sh` to generate `.env` automatically. It detects your UID/GID and picks an available SSH port in 2000-3000.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HOST_UID` | 1000 | Host user UID (`id -u`) |
-| `HOST_GID` | 1000 | Host user GID (`id -g`) |
-| `SSH_PORT` | 2222 | SSH port forwarded to host |
+| `HOST_UID` | 1000 | Host user UID (auto-detected via `id -u`) |
+| `HOST_GID` | 1000 | Host user GID (auto-detected via `id -g`) |
+| `SSH_PORT` | 2222 | SSH port forwarded to host (auto-selected) |
 
 ### Notes
 
