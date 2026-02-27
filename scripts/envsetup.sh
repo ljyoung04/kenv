@@ -58,7 +58,11 @@ function current() {
     info "CC:       $CC"
     info "KSRC:     $KSRC"
     info "KOBJ:     $KOBJ"
-    info "FS:       $FS"
+    if [ -n "$FS" ] && [ "$FS" != "" ]; then
+        info "FS:       $FS"
+    else
+        warn "FS:       (not set) Use 'lsfs' / 'setfs <name>' / 'mkfs <name>'"
+    fi
     info "SSH_PORT: $SSH_PORT"
     info "GDB_PORT: $GDB_PORT"
     info "$CMD"
@@ -83,7 +87,11 @@ function print_info() {
     info "CC:       $CC"
     info "KSRC:     $KSRC"
     info "KOBJ:     $KOBJ"
-    info "FS:       $FS"
+    if [ -n "$FS" ] && [ "$FS" != "" ]; then
+        info "FS:       $FS"
+    else
+        warn "FS:       (not set) Use 'lsfs' / 'setfs <name>' / 'mkfs <name>'"
+    fi
     info "SSH_PORT: $SSH_PORT"
     info "GDB_PORT: $GDB_PORT"
     info "SHARE:    $SHARE"
@@ -127,7 +135,11 @@ function lsfs() {
             if fuser "$img" >/dev/null 2>&1; then
                 status=" [IN USE]"
             fi
-            printf "%s[%s] bookworm.img (%s)%s\n" "$marker" "$name" "$size" "$status"
+            local arch="?"
+            if [ -f "$dir/.arch" ]; then
+                arch=$(cat "$dir/.arch")
+            fi
+            printf "%s[%s] bookworm.img (%s, %s)%s\n" "$marker" "$name" "$size" "$arch" "$status"
         fi
     done
 
@@ -225,8 +237,9 @@ function mkfs() {
     info "Creating filesystem image: images/$name/"
     info "Arch: $ci_arch, Distro: $distro, Size: ${size}MB"
 
-    # Create directory
+    # Create directory and save arch metadata
     mkdir -p "$img_dir"
+    echo "$ci_arch" > "$img_dir/.arch"
 
     # Run create-image.sh from the image directory
     local prev_dir="$PWD"
@@ -302,7 +315,6 @@ if [ -n "$FS" ] && [ "$FS" != "" ]; then
     force_export "FS" "$FS"
 else
     force_export "FS" ""
-    warn "FS not set. Use 'setfs <name>' or 'lsfs' to manage filesystem images."
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -357,6 +369,8 @@ case "$CC" in
         return 1
         ;;
 esac
+
+export -n CC   # keep CC as shell variable only, not exported to child processes
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 9) Final output and directory setup

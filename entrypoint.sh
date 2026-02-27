@@ -16,7 +16,7 @@ fi
 
 HOST_UID="${HOST_UID:-1000}"
 HOST_GID="${HOST_GID:-1000}"
-USERNAME="dev"
+USERNAME="compsec"
 
 # Remove existing user/group that conflicts with host IDs
 EXISTING_USER=$(getent passwd "$HOST_UID" 2>/dev/null | cut -d: -f1 || true)
@@ -45,7 +45,7 @@ echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$USERNAME"
 mkdir -p /run/sshd
 # Generate host keys if missing
 [ ! -f /etc/ssh/ssh_host_rsa_key ] && ssh-keygen -A
-# Allow password auth for dev user (set empty password)
+# Allow password auth for compsec user (set empty password)
 passwd -d "$USERNAME" 2>/dev/null || true
 sed -i 's/^#\?PermitEmptyPasswords.*/PermitEmptyPasswords yes/' /etc/ssh/sshd_config
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config

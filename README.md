@@ -51,7 +51,7 @@ cp .env.example .env
 docker compose up -d
 
 # 3. Enter the container
-docker compose exec -u dev kernel-dev bash
+docker compose exec -u compsec kernel-dev bash
 
 # 4. Build a kernel inside the container
 cd /workspace
@@ -98,9 +98,9 @@ Multiple images can coexist under `images/`. Use `lsfs` and `setfs` to manage th
 ```bash
 # List available images and their status
 $ lsfs
-  [x64] bookworm.img (2.0G)
-* [compsec] bookworm.img (2.0G)
-  [aarch64] bookworm.img (2.0G)
+  [x64] bookworm.img (2.0G, x86_64)
+* [compsec] bookworm.img (5.0G, x86_64)
+  [aarch64] bookworm.img (2.0G, aarch64)
 
 # Select a filesystem image
 $ setfs compsec
@@ -121,20 +121,42 @@ setfs compsec
 $SCRIPTS/run-vm.sh -s # Launch VM with shared directory
 ```
 
-### Guest Workflow
+### SSH into Container
+
+Connection path: **Local → Server → Container**
+
+```bash
+# From server (docker host)
+ssh -p 2222 compsec@localhost
+
+# From local machine (jump proxy through server)
+ssh -J user@server -p 2222 compsec@localhost
+```
+
+SSH port is configurable via `SSH_PORT` in `.env` (default: 2222).
+
+### SSH/SCP into VM
+
+Connection path: **Container → VM**
 
 ```bash
 # SSH into the VM
-ssh -p $SSH_PORT -i $FS/bookworm.id_rsa root@localhost
+ssh -p $SSH_PORT -i $FS/bookworm.id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@localhost
 
 # SCP files to the VM
-scp -P $SSH_PORT -i $FS/bookworm.id_rsa scripts/tracer.sh root@localhost:/root/
+scp -P $SSH_PORT -i $FS/bookworm.id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null scripts/tracer.sh root@localhost:/root/
+```
 
+### Guest Workflow
+
+Inside the QEMU VM:
+
+```bash
 # Mount shared directory (host $SHARE ↔ guest /mnt)
 mount -t 9p -o trans=virtio host_share /mnt
 
 # Load ftrace helpers and see available commands
-source /mnt/tracer.sh
+source tracer.sh
 thelp
 ```
 
@@ -142,15 +164,6 @@ thelp
 
 ```bash
 docker compose down
-```
-
-### SSH Access
-
-```bash
-# Password-less SSH into the container
-ssh -p 2222 dev@localhost
-
-# SSH port is configurable via SSH_PORT in .env (default: 2222)
 ```
 
 ### Clipboard
@@ -162,7 +175,7 @@ Uses OSC 52 escape sequences, which work through any number of SSH hops (e.g., W
 pwd | clip
 
 # Works from SSH too
-ssh -p 2222 dev@localhost
+ssh -p 2222 compsec@localhost
 $ echo hello | clip
 ```
 
@@ -190,10 +203,10 @@ $ echo hello | clip
 ### Notes
 
 - Missing `.env` file will show a setup guide on container start.
-- The `dev` user inside the container matches your host UID/GID, avoiding file ownership issues.
+- The `compsec` user inside the container matches your host UID/GID, avoiding file ownership issues.
 - The project directory is bind-mounted to `/workspace`. Host file changes are reflected immediately.
 - Runs in `privileged` mode for scripts using loopback devices (e.g., `create-image.sh`).
-- The `dev` user has passwordless sudo.
+- The `compsec` user has passwordless sudo.
 - To customize dotfiles, edit files in `dotfiles/` and run `docker compose build`.
 
 ---

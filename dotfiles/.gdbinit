@@ -13,13 +13,13 @@ alias pp=p*
 
 # custom commands
 define view_code
-    gef config context.layout "legend source memory trace threads extra"
-    gef config context.nb_lines_code 23
+    gef config context.layout "legend source mem_access trace threads extra"
+    gef config context_source.nb_lines 23
 end
 
 define view_gef
-    gef config context.layout "legend regs stack code args source memory threads trace extra"
-    gef config context.nb_lines_code 6
+    gef config context.layout "legend regs stack code args source mem_access threads trace extra"
+    gef config context_code.nb_lines 6
 end
 
 define view_zero
@@ -132,3 +132,4 @@ class BTRCommand(gdb.Command):
 
 BTRCommand()
 end
+

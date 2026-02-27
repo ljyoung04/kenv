@@ -13,3 +13,5 @@ services:
     tty: true
     privileged: true  # Required for debootstrap, mount, loopback devices
     working_dir: /workspace
+    labels:
+      - "devcontainer.metadata=[{\"remoteUser\": \"compsec\"}]"
