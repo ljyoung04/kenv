@@ -3,6 +3,7 @@
 set -e
 
 SKEL="/etc/skel"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) oh-my-bash
@@ -22,16 +23,22 @@ git clone --depth=1 https://github.com/jan-warchol/smart-bash-history.git /opt/s
 sed -i 's/\[ -e $HISTFILE \] && cp $HISTFILE/[ -e $HISTFILE ] \&\& command cp $HISTFILE/' /opt/smart-bash-history/backup.sh
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4) zoxide
+# 4) oh-my-tmux
+# ──────────────────────────────────────────────────────────────────────────────
+git clone --depth=1 https://github.com/gpakosz/.tmux.git /opt/oh-my-tmux
+ln -sf /opt/oh-my-tmux/.tmux.conf "$SKEL/.tmux.conf"
+command cp "$SCRIPT_DIR/.tmux.conf.local" "$SKEL/.tmux.conf.local"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5) zoxide
 # ──────────────────────────────────────────────────────────────────────────────
 curl -sS https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | bash
 # install.sh puts binary in ~/.local/bin; move to system path
 mv /root/.local/bin/zoxide /usr/local/bin/zoxide 2>/dev/null || true
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5) Copy dotfiles to /etc/skel
+# 6) Copy dotfiles to /etc/skel
 # ──────────────────────────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 command cp "$SCRIPT_DIR/.bashrc"       "$SKEL/.bashrc"
 command cp "$SCRIPT_DIR/.bash_aliases" "$SKEL/.bash_aliases"
 command cp "$SCRIPT_DIR/.gdbinit"      "$SKEL/.gdbinit"
