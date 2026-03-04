@@ -1,7 +1,7 @@
 services:
   kernel-dev:
     build: .
-    container_name: linux-env
+    container_name: linux-env-${HOST_USER}
     environment:
       - HOST_UID=${HOST_UID}
       - HOST_GID=${HOST_GID}

@@ -14,9 +14,10 @@ NC='\033[0m'
 info()  { echo -e "${GREEN}[*]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 
-# --- Detect UID/GID ---
+# --- Detect UID/GID/USER ---
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
+HOST_USER="$(whoami)"
 
 # --- Find available SSH port in 2000-3000 ---
 find_available_port() {
