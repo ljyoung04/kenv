@@ -24,8 +24,7 @@ source "$SCRIPTS/.common.sh"
 
 export DEF_ARCH="x86_64"
 export DEF_CC="llvm-19"
-export DEF_SSH_PORT=20202
-export DEF_GDB_PORT=1245
+export DEF_SSH_PORT=22222
 export IMAGES="$PRJ/images"
 export CONFIGS="$PRJ/configs"
 
@@ -53,23 +52,33 @@ export PATCHES="$PRJ/patches"
 # commands
 
 function current() {
-    CMD="ARCH=$ARCH CC=$CC KSRC=$KSRC KOBJ=$KOBJ FS=$FS SSH_PORT=$SSH_PORT GDB_PORT=$GDB_PORT source $SCRIPTS/envsetup.sh"
-    info "ARCH:     $ARCH"
-    info "CC:       $CC"
-    info "KSRC:     $KSRC"
-    info "KOBJ:     $KOBJ"
-    if [ -n "$FS" ] && [ "$FS" != "" ]; then
-        info "FS:       $FS"
-    else
-        warn "FS:       (not set) Use 'lsfs' / 'setfs <name>' / 'mkfs <name>'"
-    fi
-    info "SSH_PORT: $SSH_PORT"
-    info "GDB_PORT: $GDB_PORT"
-    info "$CMD"
-    warn "Run 'source ~/$(basename "$FILEPATH_ENV")' to restore this environment"
-    echo "current_reset" >| "$FILEPATH_ENV"
-    echo "$CMD" >> "$FILEPATH_ENV"
-    # echo "$CMD" | clip
+    local CMD="ARCH=$ARCH CC=$CC KSRC=$KSRC KOBJ=$KOBJ FS=$FS SSH_PORT=$SSH_PORT source $SCRIPTS/envsetup.sh"
+    case "$1" in
+        -s)
+            print_info
+            info "$CMD"
+            echo "current -c 2>/dev/null" >| "$FILEPATH_ENV"
+            echo "$CMD" >> "$FILEPATH_ENV"
+            warn "Run 'source ~/$(basename "$FILEPATH_ENV")' to restore this environment"
+            ;;
+        -r)
+            unset KSRC KOBJ FS CC LLVM CROSS_COMPILE SSH_PORT GDB_PORT
+            unset _READY
+            info "Kernel environment reset. Common variables (PRJ, SCRIPTS, IMAGES, ...) preserved."
+            ;;
+        -c)
+            unset SCRIPTS PRJ FILEPATH_ENV
+            unset DEF_ARCH DEF_CC DEF_SSH_PORT IMAGES CONFIGS
+            unset ARCH SHARE RANDOMS SYZKALLER PATCHES
+            unset KSRC KOBJ FS CC LLVM CROSS_COMPILE SSH_PORT GDB_PORT
+            unset _READY
+            info "All environment variables have been reset."
+            ;;
+        *)
+            print_info
+            info "$CMD"
+            ;;
+    esac
 }
 
 function force_export() {
@@ -95,15 +104,6 @@ function print_info() {
     info "SSH_PORT: $SSH_PORT"
     info "GDB_PORT: $GDB_PORT"
     info "SHARE:    $SHARE"
-}
-
-function current_reset() {
-    unset SCRIPTS PRJ FILEPATH_ENV
-    unset DEF_ARCH DEF_CC DEF_SSH_PORT DEF_GDB_PORT IMAGES RANDOM
-    unset ARCH SHARE TMP SYZKALLER PATCH
-    unset KSRC KOBJ FS CC LLVM CROSS_COMPILE SSH_PORT GDB_PORT
-    unset _READY
-    info "All environment variables have been reset."
 }
 
 function lsfs() {
@@ -318,21 +318,17 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6) SSH_PORT override
+# 6) SSH_PORT / GDB_PORT setup
+#    GDB_PORT = SSH_PORT - 20000 (always computed, GDB_PORT input is ignored)
 # ──────────────────────────────────────────────────────────────────────────────
-if [ -n "$SSH_PORT" ] && [ "$SSH_PORT" != "" ]; then
-    force_export "SSH_PORT" "$SSH_PORT"
-else
-    force_export "SSH_PORT" "$DEF_SSH_PORT"
+if [ -z "$SSH_PORT" ] || [ "$SSH_PORT" == "" ]; then
+    SSH_PORT="$DEF_SSH_PORT"
 fi
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 7) GDB_PORT override
-# ──────────────────────────────────────────────────────────────────────────────
-if [ -n "$GDB_PORT" ] && [ "$GDB_PORT" != "" ]; then
-    force_export "GDB_PORT" "$GDB_PORT"
-else
-    force_export "GDB_PORT" "$DEF_GDB_PORT"
+force_export "SSH_PORT" "$SSH_PORT"
+force_export "GDB_PORT" "$(( SSH_PORT - 20000 ))"
+if [ "$GDB_PORT" -le 0 ]; then
+    error "Error: SSH_PORT $SSH_PORT is too small (must be > 20000, GDB_PORT would be $GDB_PORT)"
+    return 1
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -376,7 +372,7 @@ export -n CC   # keep CC as shell variable only, not exported to child processes
 # 9) Final output and directory setup
 # ──────────────────────────────────────────────────────────────────────────────
 
-current
+current -s
 
 if [ ! -d "$KOBJ" ]; then
     mkdir -p "$KOBJ"

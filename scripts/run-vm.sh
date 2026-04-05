@@ -1,10 +1,10 @@
 #!/bin/bash
 
-if [ -z "$_READY" ]; then
-    echo "[-] run env.sh first"
-    echo "source env.sh"
-    exit 1
-fi
+# if [ -z "$_READY" ]; then
+#     echo "[-] run env.sh first"
+#     echo "source env.sh"
+#     exit 1
+# fi
 
 # --- FS validation ---
 if [ -z "$FS" ] || [ "$FS" == "" ]; then
@@ -77,9 +77,12 @@ done
 
 QEMU_BIN=qemu-system-x86_64
 
-KERNEL_APPEND="console=ttyS0 root=/dev/sda earlyprintk=serial net.ifnames=0 page_poison=1 kasan_multi_shot panic=0 sysctl.user.max_user_namespaces=0"
-KERNEL_APPEND="$KERNEL_APPEND no_hash_pointers"
-# KERNEL_APPEND="$KERNEL_APPEND isolcpus=managed,domain,1 nohz_full=1,domain,1 rcu_nocbs=1 acpi=noirq"
+KERNEL_APPEND="console=ttyS0 root=/dev/sda earlyprintk=serial net.ifnames=0 page_poison=1 kasan_multi_shot panic=0"
+KERNEL_APPEND="$KERNEL_APPEND" # sysctl.user.max_user_namespaces=1" # namespace restriction
+KERNEL_APPEND="$KERNEL_APPEND no_hash_pointers acpi=noirq"
+KERNEL_APPEND="$KERNEL_APPEND oops=oops"
+# KERNEL_APPEND="$KERNEL_APPEND slub_debug=T,kmalloc-192"
+# KERNEL_APPEND="$KERNEL_APPEND isolcpus=managed,domain,1 nohz_full=1,domain,1 rcu_nocbs=1"
 if [ "$ENABLE_KASLR" = "false" ]; then
     KERNEL_APPEND="$KERNEL_APPEND nokaslr"
 fi
@@ -92,12 +95,12 @@ fi
 
 QEMU_COMMAND=(
     "sudo" "$QEMU_BIN"
-    -m 4g
+    -m 3.5G
     -cpu host
     -smp 2
     -kernel "$KOBJ/arch/x86/boot/bzImage"
     -append "$KERNEL_APPEND"
-    -drive "file=$FS/bookworm.img,format=raw"
+    -drive "file=$FS/bookworm.img,format=raw,snapshot=on"
     -nic user,model=virtio-net-pci,hostfwd=tcp::${SSH_PORT}-:22
 )
     # -net "user,host=10.0.2.10,hostfwd=tcp:127.0.0.1:20202-:22"
@@ -113,7 +116,7 @@ fi
 QEMU_COMMAND+=(
     -enable-kvm
     -nographic
-    -pidfile vm.pid
+    -pidfile $SHARE/vm-${SSH_PORT}.pid
     -gdb tcp::${GDB_PORT}
 )
 

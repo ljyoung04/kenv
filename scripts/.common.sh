@@ -14,3 +14,11 @@ warn() {
 error() {
     echo -e "[-] ${ERROR}$1${RESET}"
 }
+
+check_port_available() {
+    local port="$1"
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+        return 1
+    fi
+    return 0
+}

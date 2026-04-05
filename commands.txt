@@ -1,13 +1,21 @@
+# multi vm
+SSH_PORT=25253 source $SCRIPTS/envsetup.sh
+SSH_PORT=25254 source $SCRIPTS/envsetup.sh
+
+# sgpu
+SSH_PORT=22222 SRC=sgpu-linux-6.1.93 OBJ=debug source $SCRIPTS/envsetup.sh
 SRC=linux-6.12.y OBJ=debug source scripts/envsetup.sh
 
 # CVE-2024-50264
 wget -qO- https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.56.tar.xz | tar xJf - -C kernels/
-# kernel 버전마다? 전부 다르게 써야겠음... 
 SSH_PORT=20203 GDB_PORT=2345 FS=$PRJ/images/Ax64 SRC=linux-6.6.56 OBJ=debug source scripts/envsetup.sh
 cp $CONFIGS/kernelctf.config $KOBJ/.config
+cat $CONFIGS/kasan_config >> $KOBJ/.config
+
 make -C $KSRC O=$KOBJ olddefconfig
 make -C $KSRC O=$KOBJ -j`nproc` >/dev/null
 $KSRC/scripts/clang-tools/gen_compile_commands.py -d $KOBJ -o $KSRC/compile_commands.json
+cp $CONFIGS/.clangd $KSRC
 
 ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ defconfig
 ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ kvm_guest.config
