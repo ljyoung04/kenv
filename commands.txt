@@ -1,3 +1,6 @@
+# kernelctf
+$SCRIPTS/run-vm.sh -k --kernel $KCTF/releases/lts-6.12.79/bzImage
+
 # multi vm
 SSH_PORT=25253 source $SCRIPTS/envsetup.sh
 SSH_PORT=25254 source $SCRIPTS/envsetup.sh
