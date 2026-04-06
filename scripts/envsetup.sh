@@ -274,6 +274,21 @@ function mkfs() {
     setfs "$name"
 }
 
+function vmhttp() {
+    local dir="${1:-${SHARE:-.}}"
+    local port="${2:-8888}"
+
+    if [ ! -d "$dir" ]; then
+        error "Directory not found: $dir"
+        return 1
+    fi
+
+    dir="$(realpath "$dir")"
+    info "Serving $dir on port $port"
+    info "Guest: curl -O 10.0.2.2:$port/<filename>"
+    python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir"
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 3) KSRC override (SRC > KSRC)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -372,7 +387,7 @@ export -n CC   # keep CC as shell variable only, not exported to child processes
 # 9) Final output and directory setup
 # ──────────────────────────────────────────────────────────────────────────────
 
-current -s
+current
 
 if [ ! -d "$KOBJ" ]; then
     mkdir -p "$KOBJ"

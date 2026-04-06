@@ -1,10 +1,56 @@
 #!/bin/bash
 
-# if [ -z "$_READY" ]; then
-#     echo "[-] run env.sh first"
-#     echo "source env.sh"
-#     exit 1
-# fi
+# --- Defaults ---
+DIRECT_KERNEL=""
+ENABLE_FSDEV=false
+ENABLE_PAGE_TABLE_CHECK=false
+ENABLE_STOP=false
+ENABLE_KASLR=false
+
+# --- Parse flags first ---
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --help|-h)
+            echo "Usage: run.sh [--kernel|-K <bzImage>] [--shared|-s] [--page-check|-p] [-S] [-k]"
+            exit 0
+            ;;
+        --kernel)
+            DIRECT_KERNEL="$2"
+            shift 2
+            ;;
+        -k)
+            ENABLE_KASLR=true
+            shift
+            ;;
+        -S)
+            ENABLE_STOP=true
+            shift
+            ;;
+        --shared|-s)
+            ENABLE_FSDEV=true
+            shift
+            ;;
+        --page-check|-p)
+            ENABLE_PAGE_TABLE_CHECK=true
+            shift
+            ;;
+        *)
+            echo "Not supported option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# --- Kernel image resolution ---
+if [ -n "$DIRECT_KERNEL" ]; then
+    if [ ! -f "$DIRECT_KERNEL" ]; then
+        echo "[-] Kernel not found: $DIRECT_KERNEL"
+        exit 1
+    fi
+    KERNEL_IMAGE="$DIRECT_KERNEL"
+else
+    KERNEL_IMAGE="$KOBJ/arch/x86/boot/bzImage"
+fi
 
 # --- FS validation ---
 if [ -z "$FS" ] || [ "$FS" == "" ]; then
@@ -32,48 +78,18 @@ fi
 
 # --- Print environment variables ---
 echo "================================================="
-echo "KSRC:     $KSRC"
-echo "KOBJ:     $KOBJ"
+if [ -n "$DIRECT_KERNEL" ]; then
+    echo "KERNEL:   $DIRECT_KERNEL"
+else
+    echo "KSRC:     $KSRC"
+    echo "KOBJ:     $KOBJ"
+fi
 echo "SHARE:    $SHARE"
 echo "FS:       $FS"
 echo "SSH_PORT: $SSH_PORT"
 echo "GDB_PORT: $GDB_PORT"
 echo "================================================="
 echo
-
-ENABLE_FSDEV=false
-ENABLE_PAGE_TABLE_CHECK=false
-ENABLE_STOP=false
-ENABLE_KASLR=false
-
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --help|-h)
-            echo "Usage: run.sh [--shared|-s] [--page-check|-p] [-S] [-k]"
-            exit 0
-            ;;
-        -k)
-            ENABLE_KASLR=true
-            shift
-            ;;
-        -S)
-            ENABLE_STOP=true
-            shift
-            ;;
-        --shared|-s)
-            ENABLE_FSDEV=true
-            shift
-            ;;
-        --page-check|-p)
-            ENABLE_PAGE_TABLE_CHECK=true
-            shift
-            ;;
-        *)
-            echo "Not supported option: $1"
-            exit 1
-            ;;
-    esac
-done
 
 QEMU_BIN=qemu-system-x86_64
 
@@ -98,7 +114,7 @@ QEMU_COMMAND=(
     -m 3.5G
     -cpu host
     -smp 2
-    -kernel "$KOBJ/arch/x86/boot/bzImage"
+    -kernel "$KERNEL_IMAGE"
     -append "$KERNEL_APPEND"
     -drive "file=$FS/bookworm.img,format=raw,snapshot=on"
     -nic user,model=virtio-net-pci,hostfwd=tcp::${SSH_PORT}-:22
