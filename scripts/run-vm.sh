@@ -93,7 +93,7 @@ echo
 
 QEMU_BIN=qemu-system-x86_64
 
-KERNEL_APPEND="console=ttyS0 root=/dev/sda earlyprintk=serial net.ifnames=0 page_poison=1 kasan_multi_shot panic=0"
+KERNEL_APPEND="console=ttyS0 root=/dev/vda earlyprintk=serial net.ifnames=0 page_poison=1 kasan_multi_shot panic=0"
 KERNEL_APPEND="$KERNEL_APPEND" # sysctl.user.max_user_namespaces=1" # namespace restriction
 KERNEL_APPEND="$KERNEL_APPEND no_hash_pointers acpi=noirq"
 KERNEL_APPEND="$KERNEL_APPEND oops=oops"
@@ -116,8 +116,11 @@ QEMU_COMMAND=(
     -smp 2
     -kernel "$KERNEL_IMAGE"
     -append "$KERNEL_APPEND"
-    -drive "file=$FS/bookworm.img,format=raw,snapshot=on"
+    -drive "file=$FS/bookworm.img,format=raw,snapshot=on,if=virtio"
     -nic user,model=virtio-net-pci,hostfwd=tcp::${SSH_PORT}-:22
+    -chardev "stdio,id=char0,mux=on,signal=off"
+    -serial "chardev:char0"
+    -monitor "unix:$SHARE/vm-${SSH_PORT}.mon,server,nowait"
 )
     # -net "user,host=10.0.2.10,hostfwd=tcp:127.0.0.1:20202-:22"
     # -net "nic,model=e1000"

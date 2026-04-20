@@ -54,6 +54,10 @@ export PATCHES="$PRJ/patches"
 function current() {
     local CMD="ARCH=$ARCH CC=$CC KSRC=$KSRC KOBJ=$KOBJ FS=$FS SSH_PORT=$SSH_PORT source $SCRIPTS/envsetup.sh"
     case "$1" in
+        -x)
+            echo $CMD | clip
+            info "Environment command copied to clipboard."
+            ;;
         -s)
             print_info
             info "$CMD"
