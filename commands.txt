@@ -1,38 +1,95 @@
-# kernelctf
-$SCRIPTS/run-vm.sh -k --kernel $KCTF/releases/lts-6.12.79/bzImage
+# linux-env: profile + vm 흐름 (자세한 설계는 prompt_final 참고)
+# - envsetup.sh / run-vm.sh 는 레퍼런스로만 남아 있다. 새 흐름은 호출 안 함.
 
-# multi vm
-SSH_PORT=25253 source $SCRIPTS/envsetup.sh
-SSH_PORT=25254 source $SCRIPTS/envsetup.sh
+# ─────────────────────────────────────────────────────────────────────────────
+# 0. 글로벌 + 셸 함수 진입
+# ─────────────────────────────────────────────────────────────────────────────
+source scripts/env.sh
+# → PRJ/SCRIPTS/CONFIGS/IMAGES/SHARE/SYZKALLER 글로벌 export
+# → envlx, vm, lsfs/setfs/mkfs, vmhttp 셸 함수 정의
 
-# sgpu
-SSH_PORT=22222 SRC=sgpu-linux-6.1.93 OBJ=debug source $SCRIPTS/envsetup.sh
-SRC=linux-6.12.y OBJ=debug source scripts/envsetup.sh
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. profile 정의 (한 번)
+# ─────────────────────────────────────────────────────────────────────────────
+# 신규 이름으로 --profile 하면 빈 template 이 자동 생성되어 안내 후 정상 종료.
+source scripts/env.sh --profile lts-6.12   # 없으면 template 생성 후 종료
+# template 을 채운 뒤:
+$EDITOR $PRJ/profiles/lts-6.12/profile.sh
+# 예 (Variant A — 소스 빌드형):
+#   export ARCH=x86_64
+#   export LLVM=1
+#   export FS="$IMAGES/x64"
+#   export KSRC="$PRJ/kernels/linux-6.12.y"
+#   export KOBJ="$KSRC/build/debug"
+# 예 (Variant B — 미리 빌드된 bzImage):
+#   export ARCH=x86_64
+#   export LLVM=1
+#   export FS="$IMAGES/x64"
+#   export KIMAGE="$PRJ/kctf/releases/lts-6.12.79/bzImage"
 
-# CVE-2024-50264
-wget -qO- https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.6.56.tar.xz | tar xJf - -C kernels/
-SSH_PORT=20203 GDB_PORT=2345 FS=$PRJ/images/Ax64 SRC=linux-6.6.56 OBJ=debug source scripts/envsetup.sh
-cp $CONFIGS/kernelctf.config $KOBJ/.config
-cat $CONFIGS/kasan_config >> $KOBJ/.config
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. profile 진입 + 커널 빌드 (Variant A)
+# ─────────────────────────────────────────────────────────────────────────────
+source scripts/env.sh --profile lts-6.12
+scripts/kernel.sh --olddefconfig
+scripts/kernel.sh --build               # 기본 -j 16
+scripts/kernel.sh --clang               # compile_commands.json + .clangd
 
-make -C $KSRC O=$KOBJ olddefconfig
-make -C $KSRC O=$KOBJ -j`nproc` >/dev/null
-$KSRC/scripts/clang-tools/gen_compile_commands.py -d $KOBJ -o $KSRC/compile_commands.json
-cp $CONFIGS/.clangd $KSRC
+# kernelctf base config 으로 시작하기:
+scripts/kernel.sh --kctfconfig
+scripts/kernel.sh --olddefconfig
+scripts/kernel.sh --build
 
-ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ defconfig
-ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ kvm_guest.config
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. VM 부팅 + 진입
+# ─────────────────────────────────────────────────────────────────────────────
+scripts/vm.sh run a                                      # 새 vm 띄움 (이름 a)
+source scripts/env.sh --profile lts-6.12 --vm a          # 한 번에 컨텍스트 진입
 
-cat $PRJ/configs/base_config >> $KOBJ/.config
-ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ olddefconfig
+scripts/vm.sh ssh                                        # 인터랙티브 SSH
+scripts/vm.sh ssh uname -r                               # 원격 1회 실행
+scripts/vm.sh log | tail                                 # 직렬 콘솔
+scripts/vm.sh attach                                     # tmux 윈도우 attach
 
-ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ -j`nproc` >/dev/null
-ARCH=x86_64 LLVM=-19 make -C $KSRC O=$KOBJ scripts_gdb
+# 또 다른 vm 동시 운용:
+scripts/vm.sh run b
+source scripts/env.sh --vm b                             # 같은 profile 안의 b 로 전환
+scripts/vm.sh ps                                         # a, b 모두 표시 (전역)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. profile 전환
+# ─────────────────────────────────────────────────────────────────────────────
+source scripts/env.sh --profile kctf-6.12.79             # KSRC/KOBJ/FS/... 전부 unset 후 새 set
+scripts/vm.sh run x; source scripts/env.sh --vm x
 
-$KSRC/scripts/clang-tools/gen_compile_commands.py -d $KOBJ -o $KSRC/compile_commands.json
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. kill / rm 차이
+# ─────────────────────────────────────────────────────────────────────────────
+scripts/vm.sh kill              # QEMU 만 죽음, 디렉토리 / boot.log 보존 → 사후 분석 가능
+ls $VM                          # boot.log, vm.sh, vm.pid 등 잔존
+scripts/vm.sh rm                # $VM 디렉토리 통째 삭제 (살아있는 PID 면 거부)
+# `vm rm` (env.sh 의 셸 함수) 을 쓰면 성공 시 셸의 vm 스코프 env 도 같이 unset.
 
-# File system image
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. 같은 이름 재사용 (boot.log 덮어쓰기)
+# ─────────────────────────────────────────────────────────────────────────────
+scripts/vm.sh run a
+scripts/vm.sh kill
+scripts/vm.sh run a             # 같은 디렉토리 재사용, vm.sh / boot.log / vm.pid 덮어쓰기
 
-../../scripts/create-image.sh -d bookworm -s 20480 -a arm64
-../../scripts/create-image.sh -d bookworm -s 20480 -a amd64
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. agent 가 자주 쓰는 한 줄
+# ─────────────────────────────────────────────────────────────────────────────
+scripts/vm.sh ps --json                                  # 살아있는 vm 일괄 조회
+scripts/vm.sh ls --json                                  # 등록된 profile 일괄 조회
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. 파일시스템 이미지
+# ─────────────────────────────────────────────────────────────────────────────
+lsfs                                                     # $IMAGES 아래 이미지 목록
+setfs x64                                                # $FS 를 $IMAGES/x64 로 (셸 1회용)
+mkfs newimg -a arm64 -s 10240                            # 새 이미지 생성
+
+# 처음부터 만들고 싶을 때 (옛 방식):
+# ../../scripts/create-image.sh -d bookworm -s 20480 -a arm64
+# ../../scripts/create-image.sh -d bookworm -s 20480 -a amd64
