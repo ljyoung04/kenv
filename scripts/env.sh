@@ -203,21 +203,88 @@ envlx() {
     return $?
 }
 
-# `vm`: dispatcher for $SCRIPTS/vm.sh. After a successful subcommand that
-# operates on the VM currently in this shell's scope, also unset the vm-scope
-# env vars (subprocess vm.sh cannot do that for the parent shell):
-#   - `vm kill` (no arg)         → operates on $VM, unset.
-#   - `vm rm <name>`             → unset only if <name> matches current $VM.
+# `vm`: human-facing shim around $SCRIPTS/vm.sh. Auto-injects -p/-v from the
+# current shell's $PROFILE/$VM (env.sh contract) so users don't have to retype
+# them. vm.sh itself is strict and ignores inherited env; the explicit flags
+# come from here.
+#
+# Translation per subcommand:
+#   vm ls / ps / help          → vm.sh ls / ps / help                 (no flags)
+#   vm run <name> [opts]       → vm.sh -p $P run <name> [opts]        (needs $PROFILE)
+#   vm rm <name>               → vm.sh -p $P -v <name> rm             (positional → -v)
+#   vm ssh|scp|gdb|attach|kill|log [args] →
+#                                vm.sh -p $P -v $V <subcmd> [args]   (needs $PROFILE+$VM)
+#
+# After a successful operation on the VM in this shell's scope, the shim
+# unsets vm-scope env vars (subprocess vm.sh cannot do that for the parent):
+#   - `vm kill`                  → unset (operates on current $VM)
+#   - `vm rm <name>` where <name> matches $(basename "$VM") → unset.
 vm() {
-    "$SCRIPTS/vm.sh" "$@"
-    local _rc=$?
-    if [ "$_rc" -eq 0 ] && [ -n "${VM:-}" ]; then
-        case "${1:-}" in
-            kill) _envlx_unset_vm_scope ;;
-            rm)   [ "${2:-}" = "$(basename "$VM")" ] && _envlx_unset_vm_scope ;;
-        esac
+    local subcmd="${1:-}"
+    if [ -z "$subcmd" ]; then
+        "$SCRIPTS/vm.sh" help
+        return $?
     fi
+    local _rc=0
+    case "$subcmd" in
+        ls|ps|help|-h|--help)
+            "$SCRIPTS/vm.sh" "$@" || _rc=$?
+            ;;
+        run)
+            if [ -z "${PROFILE:-}" ]; then
+                error "vm run: no \$PROFILE; run \`envlx --profile <name>\` first"
+                return 2
+            fi
+            shift
+            "$SCRIPTS/vm.sh" -p "$(basename "$PROFILE")" run "$@" || _rc=$?
+            ;;
+        rm)
+            shift
+            local _target="${1:-}"
+            if [ -z "$_target" ]; then
+                error "usage: vm rm <vm_name>"
+                return 2
+            fi
+            shift
+            if [ -z "${PROFILE:-}" ]; then
+                error "vm rm: no \$PROFILE; run \`envlx --profile <name>\` first"
+                return 2
+            fi
+            "$SCRIPTS/vm.sh" -p "$(basename "$PROFILE")" -v "$_target" rm "$@" || _rc=$?
+            if [ "$_rc" -eq 0 ] && [ -n "${VM:-}" ] && [ "$_target" = "$(basename "$VM")" ]; then
+                _envlx_unset_vm_scope
+            fi
+            ;;
+        ssh|scp|gdb|attach|kill|log)
+            if [ -z "${PROFILE:-}" ] || [ -z "${VM:-}" ]; then
+                error "vm $subcmd: no \$PROFILE/\$VM; run \`envlx --profile <p> --vm <v>\` first"
+                return 2
+            fi
+            shift
+            "$SCRIPTS/vm.sh" -p "$(basename "$PROFILE")" -v "$(basename "$VM")" "$subcmd" "$@" || _rc=$?
+            if [ "$_rc" -eq 0 ] && [ "$subcmd" = "kill" ]; then
+                _envlx_unset_vm_scope
+            fi
+            ;;
+        *)
+            "$SCRIPTS/vm.sh" "$@" || _rc=$?
+            ;;
+    esac
     return $_rc
+}
+
+# `kernel`: human-facing shim around $SCRIPTS/kernel.sh. Auto-injects -p from
+# the current $PROFILE so users don't have to retype it.
+kernel() {
+    if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+        "$SCRIPTS/kernel.sh" "$@"
+        return $?
+    fi
+    if [ -z "${PROFILE:-}" ]; then
+        error "kernel: no \$PROFILE; run \`envlx --profile <name>\` first"
+        return 2
+    fi
+    "$SCRIPTS/kernel.sh" -p "$(basename "$PROFILE")" "$@"
 }
 
 # ---------------------------------------------------------------------------

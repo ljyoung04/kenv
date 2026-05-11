@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# linux-env: vm management. Replaces the old flag-based interface.
-# Subcommands operate on the current $PROFILE / $VM context (set by env.sh).
+# linux-env: vm management. Stateless CLI — profile/vm scope is always passed
+# explicitly via -p/-v flags. Inherited env from the parent shell is ignored;
+# `vm.sh` always starts with a clean profile/vm scope (PRJ stays since it's
+# the project root).
+#
+# Humans typically don't call vm.sh directly; the `vm` shell function in
+# env.sh auto-injects -p/-v from $PROFILE/$VM. Agents (and scripts) pass
+# them explicitly: `vm.sh -p <profile> -v <vm> ssh -- ls`.
 
 set -euo pipefail
 
@@ -8,20 +14,31 @@ SCRIPT_DIR="$(realpath "$(dirname "${BASH_SOURCE[0]}")")"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.common.sh"
 
+# Start with a clean profile/vm scope. Subsequent -p/-v parsing fills them.
+# Keep PRJ from the environment (the project root must be set by env.sh).
+unset PROFILE PROFILE_SH ARCH LLVM FS KSRC KOBJ KIMAGE
+unset VM VM_SH SSH_PORT GDB_PORT
+unset VM_STARTED_AT VM_KERNEL_IMAGE VM_VMLINUX VM_KSRC VM_KOBJ VM_FS VM_LOG
+
 usage() {
     cat <<'EOF'
-Usage: vm.sh <command> [args]
+Usage: vm.sh [-p <profile>] [-v <vm>] <command> [args]
 
-Context-independent (uses $PRJ from env):
+The -p/-v flags are STRICTLY required (no inherited env). Profile-scope env
+vars (ARCH/LLVM/FS/KSRC/KOBJ/KIMAGE) are loaded from $PRJ/profiles/<p>/profile.sh;
+VM-scope (SSH_PORT/GDB_PORT/...) is loaded from .../vms/<v>/vm.sh.
+
+Context-independent (no flags):
   ls [--json]              List registered profiles + static info
   ps [--json]              List running VMs (PID alive in /proc)
   help                     Show this help
 
-Profile context required ($PROFILE):
-  run <vm_name> [opts]     Boot a new VM under the current profile
-                           opts: --shared (9p host_share), --kaslr (enable KASLR)
+Profile required (-p):
+  run <vm_name> [opts]     Boot a new VM under -p. opts:
+                             --shared   enable 9p host_share
+                             --kaslr    enable KASLR (default: nokaslr)
 
-VM context required ($VM, $VM_SH, $SSH_PORT, $GDB_PORT):
+Profile + vm required (-p -v):
   ssh [-- <cmd>...]        SSH into the VM (no args → interactive shell). The
                            '--' before <cmd> is required when a remote command
                            is supplied. ConnectTimeout=1; on failure diagnoses
@@ -29,13 +46,12 @@ VM context required ($VM, $VM_SH, $SSH_PORT, $GDB_PORT):
   scp <src> <dst>          SCP between host and VM ('vm:/path' for remote side)
   gdb                      Attach gdb (auto-loads vmlinux when available)
   attach                   Attach to the VM's tmux window
-  kill                     Stop QEMU process; preserve $VM directory (use 'rm <v>' separately to delete)
-  rm <vm_name>             Remove VM directory (rejects live VM). The vm name
-                           is REQUIRED — no implicit default from $VM.
-  log                      tail -f $VM/boot.log (full content + follow)
+  kill                     Stop QEMU process; preserve VM directory
+  rm                       Remove the VM directory (target = -v; rejects live VM)
+  log                      tail -f $VM/boot.log
 
-State files (under $PROFILE/vms/<vm_name>/):
-  vm.sh    SSH_PORT/GDB_PORT/metadata exports (sourced by env.sh)
+State files (under $PRJ/profiles/<p>/vms/<v>/):
+  vm.sh    SSH_PORT/GDB_PORT/metadata exports (sourced after -v)
   vm.pid   QEMU PID (single source of truth for liveness)
   boot.log serial console
 EOF
@@ -88,11 +104,7 @@ require_prj() {
 require_profile() {
     require_prj
     if [ -z "${PROFILE:-}" ]; then
-        error "No profile context. Use: source \$SCRIPTS/env.sh --profile <name>"
-        exit 2
-    fi
-    if [ ! -d "$PROFILE" ]; then
-        error "PROFILE directory missing: $PROFILE"
+        error "this subcommand requires -p <profile>"
         exit 2
     fi
 }
@@ -100,15 +112,7 @@ require_profile() {
 require_vm() {
     require_profile
     if [ -z "${VM:-}" ] || [ -z "${VM_SH:-}" ]; then
-        error "No vm context. Use: source \$SCRIPTS/env.sh --vm <name>"
-        exit 2
-    fi
-    if [ ! -d "$VM" ]; then
-        error "VM directory missing: $VM"
-        exit 2
-    fi
-    if [ ! -f "$VM_SH" ]; then
-        error "VM metadata missing: $VM_SH"
+        error "this subcommand requires -p <profile> -v <vm>"
         exit 2
     fi
 }
@@ -679,31 +683,25 @@ cmd_kill() {
 }
 
 cmd_rm() {
-    require_profile
-    local vm_name="${1:-}"
-    if [ -z "$vm_name" ]; then
-        error "usage: vm.sh rm <vm_name>"
+    require_vm
+    if [ "$#" -gt 0 ]; then
+        error "rm takes no positional args; target is -v <vm_name>"
         exit 2
     fi
-    local target="$PROFILE/vms/$vm_name"
-    if [ ! -d "$target" ]; then
-        error "VM directory missing: $target"
-        exit 1
-    fi
     local pid
-    pid="$(read_pid "$target")"
+    pid="$(read_pid "$VM")"
     if is_pid_alive "$pid"; then
-        error "VM '$vm_name' is still running (pid=$pid). Run 'vm.sh kill' first."
+        error "VM '$(basename "$VM")' is still running (pid=$pid). Run 'vm.sh kill' first."
         exit 1
     fi
-    case "$target" in
+    case "$VM" in
         "$PRJ"/profiles/*/vms/*) ;;
         *)
-            error "Refusing to rm outside profiles/*/vms/: $target"
+            error "Refusing to rm outside profiles/*/vms/: $VM"
             exit 1 ;;
     esac
-    rm -rf "$target"
-    info "Removed $target"
+    rm -rf "$VM"
+    info "Removed $VM"
 }
 
 cmd_log() {
@@ -720,6 +718,64 @@ cmd_log() {
 # Dispatch
 # ---------------------------------------------------------------------------
 
+# Parse top-level -p/-v flags (must come before the subcommand).
+PROFILE_ARG=""
+VM_ARG=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -p|--profile)
+            if [ "$#" -lt 2 ]; then error "-p requires <profile>"; exit 2; fi
+            PROFILE_ARG="$2"; shift 2 ;;
+        -v|--vm)
+            if [ "$#" -lt 2 ]; then error "-v requires <vm>"; exit 2; fi
+            VM_ARG="$2"; shift 2 ;;
+        -h|--help|help) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) error "Unknown global option: $1"; usage; exit 2 ;;
+        *) break ;;
+    esac
+done
+
+require_prj
+
+# Resolve -p → PROFILE / PROFILE_SH + load profile.sh
+if [ -n "$PROFILE_ARG" ]; then
+    PROFILE="$PRJ/profiles/$PROFILE_ARG"
+    PROFILE_SH="$PROFILE/profile.sh"
+    if [ ! -d "$PROFILE" ]; then
+        error "Profile directory missing: $PROFILE"
+        exit 1
+    fi
+    if [ ! -f "$PROFILE_SH" ]; then
+        error "profile.sh missing: $PROFILE_SH"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$PROFILE_SH"
+    export PROFILE PROFILE_SH
+fi
+
+# Resolve -v → VM / VM_SH + load vm.sh metadata
+if [ -n "$VM_ARG" ]; then
+    if [ -z "$PROFILE_ARG" ]; then
+        error "-v requires -p"; exit 2
+    fi
+    VM="$PROFILE/vms/$VM_ARG"
+    VM_SH="$VM/vm.sh"
+    if [ ! -d "$VM" ]; then
+        error "VM directory missing: $VM"
+        exit 1
+    fi
+    if [ ! -f "$VM_SH" ]; then
+        error "VM metadata missing: $VM_SH"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$VM_SH"
+    export VM VM_SH
+fi
+
+# Subcommand dispatch
 if [ "$#" -eq 0 ]; then
     usage
     exit 0

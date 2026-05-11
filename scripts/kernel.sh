@@ -1,17 +1,11 @@
 #!/usr/bin/env bash
-# linux-env: kernel build / config helpers. Operates on the current profile.
+# linux-env: kernel build / config helpers. Stateless CLI — profile is always
+# passed explicitly via -p. Inherited profile-scope env from the parent shell
+# is ignored.
 #
-# Usage:
-#   kernel.sh --help
-#   kernel.sh --menuconfig
-#   kernel.sh --olddefconfig
-#   kernel.sh --kctfconfig            # cp $CONFIGS/kernelctf.config $KOBJ/.config
-#   kernel.sh --build [-j N]          # default -j 16
-#   kernel.sh --clang                 # gen_compile_commands.py + .clangd
-#
-# Requires (from profile, except --help):
-#   KSRC, KOBJ (Variant A profiles)
-#   ARCH, LLVM (mandatory in any profile)
+# Humans typically use the `kernel` shell function defined in env.sh, which
+# auto-injects -p from $PROFILE. Agents pass it explicitly:
+#   kernel.sh -p <profile> --build [-j N]
 
 set -euo pipefail
 
@@ -19,24 +13,32 @@ SCRIPT_DIR="$(realpath "$(dirname "${BASH_SOURCE[0]}")")"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.common.sh"
 
+# Start clean. -p will repopulate profile-scope vars.
+unset PROFILE PROFILE_SH ARCH LLVM FS KSRC KOBJ KIMAGE
+
 usage() {
     cat <<'EOF'
-Usage: kernel.sh <command>
+Usage: kernel.sh -p <profile> <command>
 
-  --help                 Show this help
+  --help                 Show this help (no -p needed)
   --menuconfig           make -C $KSRC O=$KOBJ menuconfig (ARCH/LLVM injected)
   --olddefconfig         make -C $KSRC O=$KOBJ olddefconfig
   --kctfconfig           cp $CONFIGS/kernelctf.config $KOBJ/.config
   --build [-j N]         make -C $KSRC O=$KOBJ -jN (default 16)
   --clang                Generate compile_commands.json + drop $KSRC/.clangd
 
-All commands except --help require an active profile (source env.sh --profile).
---build / --menuconfig / --olddefconfig / --clang require Variant A (KSRC + KOBJ).
+-p <profile> is STRICTLY required for all commands except --help (no inherited
+env). --build / --menuconfig / --olddefconfig / --clang require Variant A
+profiles (KSRC + KOBJ).
 EOF
 }
 
 require_profile() {
-    : "${PROFILE:?No profile context. Use: source \$SCRIPTS/env.sh --profile <name>}"
+    : "${PRJ:?PRJ not set; source scripts/env.sh first}"
+    if [ -z "${PROFILE:-}" ]; then
+        error "this subcommand requires -p <profile>"
+        exit 2
+    fi
 }
 
 require_build_ctx() {
@@ -152,6 +154,34 @@ cmd_clang() {
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
+
+# Parse top-level -p flag (must come before the subcommand).
+PROFILE_ARG=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -p|--profile)
+            if [ "$#" -lt 2 ]; then error "-p requires <profile>"; exit 2; fi
+            PROFILE_ARG="$2"; shift 2 ;;
+        -h|--help)
+            usage; exit 0 ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+
+: "${PRJ:?PRJ not set; source scripts/env.sh first}"
+
+if [ -n "$PROFILE_ARG" ]; then
+    PROFILE="$PRJ/profiles/$PROFILE_ARG"
+    PROFILE_SH="$PROFILE/profile.sh"
+    if [ ! -f "$PROFILE_SH" ]; then
+        error "profile.sh missing: $PROFILE_SH"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$PROFILE_SH"
+    export PROFILE PROFILE_SH
+fi
 
 if [ "$#" -eq 0 ]; then
     usage
