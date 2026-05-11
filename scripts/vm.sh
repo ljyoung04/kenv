@@ -22,12 +22,16 @@ Profile context required ($PROFILE):
                            opts: --shared (9p host_share), --kaslr (enable KASLR)
 
 VM context required ($VM, $VM_SH, $SSH_PORT, $GDB_PORT):
-  ssh [<cmd>...]           SSH into the VM (no cmd → interactive shell)
+  ssh [-- <cmd>...]        SSH into the VM (no args → interactive shell). The
+                           '--' before <cmd> is required when a remote command
+                           is supplied. ConnectTimeout=1; on failure diagnoses
+                           via boot.log (exit 251=unreachable, 252=panic).
   scp <src> <dst>          SCP between host and VM ('vm:/path' for remote side)
   gdb                      Attach gdb (auto-loads vmlinux when available)
   attach                   Attach to the VM's tmux window
-  kill [--rm]              Stop QEMU process; preserve $VM directory (--rm: also remove it)
-  rm [<vm_name>]           Remove VM directory (rejects live VM). Defaults to $VM.
+  kill                     Stop QEMU process; preserve $VM directory (use 'rm <v>' separately to delete)
+  rm <vm_name>             Remove VM directory (rejects live VM). The vm name
+                           is REQUIRED — no implicit default from $VM.
   log                      tail -f $VM/boot.log (full content + follow)
 
 State files (under $PROFILE/vms/<vm_name>/):
@@ -523,11 +527,67 @@ EOF
 # Subcommands: ssh / scp / gdb / attach / kill / rm / log
 # ---------------------------------------------------------------------------
 
+# Inspect $VM/boot.log to classify why an SSH connection failed.
+# Prints a one-line tag + short excerpt to stderr; returns a category code:
+#   251 = unreachable (everything that's not a panic: booting, login-up-but-
+#                      SSH-down, network issue, hang, kdb, …)
+#   252 = panic       (kernel panic / oops / BUG / GPF in boot.log)
+diagnose_vm_state() {
+    local log="$VM/boot.log"
+    local tail=""
+    if [ -f "$log" ]; then
+        tail="$(tail -c 16384 "$log" 2>/dev/null || true)"
+    fi
+
+    if printf '%s\n' "$tail" | grep -qE 'Kernel panic|Oops:|BUG: |general protection fault|Unable to handle kernel'; then
+        error "[panic] kernel panic/oops detected in boot.log:"
+        printf '%s\n' "$tail" | grep -E 'Kernel panic|Oops:|BUG: |RIP:|Call Trace:|---\[ end' | tail -8 >&2
+        return 252
+    fi
+
+    error "[unreachable] VM not accepting SSH (still booting / sshd down / network / hang / …)"
+    if [ -n "$tail" ]; then
+        printf '%s\n' "$tail" | tail -3 | sed 's/^/             /' >&2
+    fi
+    return 251
+}
+
 cmd_ssh() {
     require_vm
     : "${SSH_PORT:?SSH_PORT not set}"
     : "${FS:?FS not set}"
-    exec "$SCRIPT_DIR/ssh.sh" "$@"
+    # Require `--` before the remote command (if any) so the parser is
+    # unambiguous and remote commands can freely start with '-'.
+    if [ "$#" -gt 0 ]; then
+        if [ "$1" != "--" ]; then
+            error "Usage: vm.sh ssh [-- <cmd>...]"
+            error "Put '--' before the remote command, e.g. vm.sh ssh -- ls -al"
+            return 2
+        fi
+        shift
+    fi
+    local key="$FS/bookworm.id_rsa"
+    if [ ! -f "$key" ]; then
+        error "SSH key not found: $key"
+        return 1
+    fi
+    local opts=(
+        -p "$SSH_PORT"
+        -i "$key"
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o LogLevel=ERROR
+        -o ConnectTimeout=1
+    )
+    [ "$#" -gt 0 ] && opts+=(-t)
+    local rc=0
+    ssh "${opts[@]}" root@localhost "$@" || rc=$?
+    # ssh exit 255 = connection failure (not a remote command exit).
+    # In that case, diagnose against boot.log and surface a category code.
+    if [ "$rc" -eq 255 ]; then
+        diagnose_vm_state || rc=$?
+    fi
+    return "$rc"
 }
 
 cmd_scp() {
@@ -599,14 +659,6 @@ cmd_attach() {
 }
 
 cmd_kill() {
-    local also_rm=false
-    while [ "$#" -gt 0 ]; do
-        case "$1" in
-            --rm|-r) also_rm=true; shift ;;
-            --) shift; break ;;
-            *) error "Unknown kill option: $1"; exit 2 ;;
-        esac
-    done
     require_vm
     local pid
     pid="$(read_pid "$VM")"
@@ -624,38 +676,24 @@ cmd_kill() {
         tmux kill-window -t "$SESSION:$vname" 2>/dev/null || true
     fi
     rm -f "$VM/vm.pid" "$VM/qemu.mon"
-
-    if [ "$also_rm" = "true" ]; then
-        local target="$VM"
-        case "$target" in
-            "$PRJ"/profiles/*/vms/*)
-                rm -rf "$target"
-                info "Removed $target" ;;
-            *)
-                error "Refusing to rm outside profiles/*/vms/: $target"
-                exit 1 ;;
-        esac
-    fi
 }
 
 cmd_rm() {
     require_profile
-    local target=""
-    if [ "$#" -ge 1 ] && [ -n "$1" ]; then
-        # Explicit vm name: works even when no $VM context is set in the shell.
-        target="$PROFILE/vms/$1"
-        if [ ! -d "$target" ]; then
-            error "VM directory missing: $target"
-            exit 1
-        fi
-    else
-        require_vm
-        target="$VM"
+    local vm_name="${1:-}"
+    if [ -z "$vm_name" ]; then
+        error "usage: vm.sh rm <vm_name>"
+        exit 2
+    fi
+    local target="$PROFILE/vms/$vm_name"
+    if [ ! -d "$target" ]; then
+        error "VM directory missing: $target"
+        exit 1
     fi
     local pid
     pid="$(read_pid "$target")"
     if is_pid_alive "$pid"; then
-        error "VM is still running (pid=$pid). Run 'vm.sh kill' first."
+        error "VM '$vm_name' is still running (pid=$pid). Run 'vm.sh kill' first."
         exit 1
     fi
     case "$target" in

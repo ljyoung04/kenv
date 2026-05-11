@@ -203,14 +203,18 @@ envlx() {
     return $?
 }
 
-# `vm`: dispatcher for $SCRIPTS/vm.sh. Auto-unsets vm scope after a successful
-# `vm kill` / `vm rm` (which the subprocess cannot do for the parent shell).
+# `vm`: dispatcher for $SCRIPTS/vm.sh. After a successful subcommand that
+# operates on the VM currently in this shell's scope, also unset the vm-scope
+# env vars (subprocess vm.sh cannot do that for the parent shell):
+#   - `vm kill` (no arg)         → operates on $VM, unset.
+#   - `vm rm <name>`             → unset only if <name> matches current $VM.
 vm() {
     "$SCRIPTS/vm.sh" "$@"
     local _rc=$?
-    if [ "$_rc" -eq 0 ]; then
+    if [ "$_rc" -eq 0 ] && [ -n "${VM:-}" ]; then
         case "${1:-}" in
-            kill|rm) _envlx_unset_vm_scope ;;
+            kill) _envlx_unset_vm_scope ;;
+            rm)   [ "${2:-}" = "$(basename "$VM")" ] && _envlx_unset_vm_scope ;;
         esac
     fi
     return $_rc

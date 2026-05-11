@@ -46,8 +46,8 @@ scripts/kernel.sh --build
 scripts/vm.sh run a                                      # 새 vm 띄움 (이름 a)
 source scripts/env.sh --profile lts-6.12 --vm a          # 한 번에 컨텍스트 진입
 
-scripts/vm.sh ssh                                        # 인터랙티브 SSH
-scripts/vm.sh ssh uname -r                               # 원격 1회 실행
+scripts/vm.sh ssh                                        # 인터랙티브 SSH (인자 없을 때만 -- 생략)
+scripts/vm.sh ssh -- uname -r                            # 원격 1회 실행 (-- 다음 그대로 원격에 전달)
 scripts/vm.sh log | tail                                 # 직렬 콘솔
 scripts/vm.sh attach                                     # tmux 윈도우 attach
 
@@ -67,8 +67,8 @@ scripts/vm.sh run x; source scripts/env.sh --vm x
 # ─────────────────────────────────────────────────────────────────────────────
 scripts/vm.sh kill              # QEMU 만 죽음, 디렉토리 / boot.log 보존 → 사후 분석 가능
 ls $VM                          # boot.log, vm.sh, vm.pid 등 잔존
-scripts/vm.sh rm                # $VM 디렉토리 통째 삭제 (살아있는 PID 면 거부)
-# `vm rm` (env.sh 의 셸 함수) 을 쓰면 성공 시 셸의 vm 스코프 env 도 같이 unset.
+scripts/vm.sh rm <v>            # $PROFILE/vms/<v>/ 통째 삭제 (vm name 필수, 살아있는 PID 면 거부)
+# `vm rm <v>` (env.sh 의 셸 함수) 을 쓰면, <v> 가 현재 $VM 이면 성공 시 vm 스코프 env 도 같이 unset.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. 같은 이름 재사용 (boot.log 덮어쓰기)

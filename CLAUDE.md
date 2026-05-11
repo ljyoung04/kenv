@@ -64,10 +64,10 @@ source $SCRIPTS/env.sh --profile <p>                # enter profile (template au
 $SCRIPTS/kernel.sh --build                          # Variant A: build kernel
 $SCRIPTS/vm.sh run <v>                              # boot a VM under current profile
 source $SCRIPTS/env.sh --profile <p> --vm <v>       # enter both scopes
-$SCRIPTS/vm.sh ssh <cmd...>                         # remote command (no `--` separator)
+$SCRIPTS/vm.sh ssh -- <cmd...>                      # remote command ('--' separator required)
 $SCRIPTS/vm.sh log                                  # tail -f $VM/boot.log
 $SCRIPTS/vm.sh kill                                 # stop QEMU; preserves $VM/boot.log
-$SCRIPTS/vm.sh rm                                   # delete $VM/ (refuses live VM)
+$SCRIPTS/vm.sh rm <v>                               # delete $PROFILE/vms/<v>/ (vm name REQUIRED, refuses live VM)
 ```
 
 Discovery (no context required):

@@ -34,4 +34,5 @@ exec scp -P "$SSH_PORT" \
     -i "$KEY" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
     "$@"
