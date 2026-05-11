@@ -18,15 +18,16 @@ Context-independent (uses $PRJ from env):
   help                     Show this help
 
 Profile context required ($PROFILE):
-  run <vm_name>            Boot a new VM under the current profile
+  run <vm_name> [opts]     Boot a new VM under the current profile
+                           opts: --shared (9p host_share), --kaslr (enable KASLR)
 
 VM context required ($VM, $VM_SH, $SSH_PORT, $GDB_PORT):
   ssh [<cmd>...]           SSH into the VM (no cmd → interactive shell)
   scp <src> <dst>          SCP between host and VM ('vm:/path' for remote side)
   gdb                      Attach gdb (auto-loads vmlinux when available)
   attach                   Attach to the VM's tmux window
-  kill                     Stop QEMU process; preserve $VM directory
-  rm                       Remove $VM directory (rejects live VM)
+  kill [--rm]              Stop QEMU process; preserve $VM directory (--rm: also remove it)
+  rm [<vm_name>]           Remove VM directory (rejects live VM). Defaults to $VM.
   log                      tail -f $VM/boot.log (full content + follow)
 
 State files (under $PROFILE/vms/<vm_name>/):
@@ -323,9 +324,25 @@ cmd_ps() {
 # ---------------------------------------------------------------------------
 
 cmd_run() {
-    local vm_name="${1:-}"
+    local vm_name=""
+    local enable_shared=false
+    local enable_kaslr=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --shared) enable_shared=true; shift ;;
+            --kaslr)  enable_kaslr=true;  shift ;;
+            --) shift; break ;;
+            -*) error "Unknown run option: $1"; exit 2 ;;
+            *)
+                if [ -z "$vm_name" ]; then
+                    vm_name="$1"; shift
+                else
+                    error "Unexpected positional arg: $1"; exit 2
+                fi ;;
+        esac
+    done
     if [ -z "$vm_name" ]; then
-        error "usage: vm.sh run <vm_name>"
+        error "usage: vm.sh run <vm_name> [--shared] [--kaslr]"
         exit 2
     fi
     require_profile
@@ -408,7 +425,10 @@ cmd_run() {
 
     # Build QEMU args (x86_64 only for now)
     local QEMU_BIN=qemu-system-x86_64
-    local KAPPEND="console=ttyS0 root=/dev/vda earlyprintk=serial net.ifnames=0 page_poison=1 kasan_multi_shot panic=0 no_hash_pointers acpi=noirq oops=oops nokaslr"
+    local KAPPEND="console=ttyS0 root=/dev/vda earlyprintk=serial net.ifnames=0 page_poison=1 kasan_multi_shot panic=0 no_hash_pointers acpi=noirq oops=oops"
+    if [ "$enable_kaslr" = "false" ]; then
+        KAPPEND="$KAPPEND nokaslr"
+    fi
     local QEMU_ARGS=(
         -m 3.5G
         -cpu host
@@ -425,6 +445,14 @@ cmd_run() {
         -monitor "unix:$MON_FILE,server,nowait"
         -gdb "tcp::${GDB_P}"
     )
+    if [ "$enable_shared" = "true" ]; then
+        : "${SHARE:?SHARE not set; source scripts/env.sh first}"
+        mkdir -p "$SHARE"
+        QEMU_ARGS+=(
+            -fsdev "local,security_model=passthrough,id=fsdev0,path=$SHARE/"
+            -device "virtio-9p-pci,fsdev=fsdev0,mount_tag=host_share"
+        )
+    fi
 
     # tmux launch
     if ! command -v tmux >/dev/null 2>&1; then
@@ -484,6 +512,8 @@ cmd_run() {
  PID:      $QEMU_PID
  LOG:      $LOG_FILE
  TMUX:     $SESSION:$vm_name
+ SHARED:   $([ "$enable_shared" = "true" ] && echo "on ($SHARE → /mnt/host_share)" || echo "off")
+ KASLR:    $([ "$enable_kaslr" = "true" ] && echo "on" || echo "off (nokaslr)")
 =================================================
 Run: envlx --vm $vm_name
 EOF
@@ -521,15 +551,29 @@ cmd_scp() {
 cmd_gdb() {
     require_vm
     : "${GDB_PORT:?GDB_PORT not set}"
+    # Resolve vmlinux: VM metadata → $KOBJ/vmlinux → alongside $KIMAGE → in $KSRC
     local vmlinux=""
     if [ -n "${VM_VMLINUX:-}" ] && [ -f "${VM_VMLINUX}" ]; then
         vmlinux="$VM_VMLINUX"
     elif [ -n "${KOBJ:-}" ] && [ -f "$KOBJ/vmlinux" ]; then
         vmlinux="$KOBJ/vmlinux"
+    elif [ -n "${KIMAGE:-}" ] && [ -f "$(dirname "$KIMAGE")/vmlinux" ]; then
+        vmlinux="$(dirname "$KIMAGE")/vmlinux"
+    elif [ -n "${KSRC:-}" ] && [ -f "$KSRC/vmlinux" ]; then
+        vmlinux="$KSRC/vmlinux"
     fi
     local args=()
     if [ -n "$vmlinux" ]; then
         args+=(-ex "file $vmlinux")
+    else
+        warn "vmlinux not found; gdb will attach without symbols."
+    fi
+    # Source path mapping: prefer KSRC, fall back to KOBJ (out-of-tree builds).
+    if [ -n "${KSRC:-}" ] && [ -d "$KSRC" ]; then
+        args+=(-ex "directory $KSRC")
+    fi
+    if [ -n "${KOBJ:-}" ] && [ -d "$KOBJ" ] && [ "${KOBJ:-}" != "${KSRC:-}" ]; then
+        args+=(-ex "directory $KOBJ")
     fi
     args+=(-ex "target remote :$GDB_PORT")
     exec gdb "${args[@]}"
@@ -555,6 +599,14 @@ cmd_attach() {
 }
 
 cmd_kill() {
+    local also_rm=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --rm|-r) also_rm=true; shift ;;
+            --) shift; break ;;
+            *) error "Unknown kill option: $1"; exit 2 ;;
+        esac
+    done
     require_vm
     local pid
     pid="$(read_pid "$VM")"
@@ -572,17 +624,40 @@ cmd_kill() {
         tmux kill-window -t "$SESSION:$vname" 2>/dev/null || true
     fi
     rm -f "$VM/vm.pid" "$VM/qemu.mon"
+
+    if [ "$also_rm" = "true" ]; then
+        local target="$VM"
+        case "$target" in
+            "$PRJ"/profiles/*/vms/*)
+                rm -rf "$target"
+                info "Removed $target" ;;
+            *)
+                error "Refusing to rm outside profiles/*/vms/: $target"
+                exit 1 ;;
+        esac
+    fi
 }
 
 cmd_rm() {
-    require_vm
+    require_profile
+    local target=""
+    if [ "$#" -ge 1 ] && [ -n "$1" ]; then
+        # Explicit vm name: works even when no $VM context is set in the shell.
+        target="$PROFILE/vms/$1"
+        if [ ! -d "$target" ]; then
+            error "VM directory missing: $target"
+            exit 1
+        fi
+    else
+        require_vm
+        target="$VM"
+    fi
     local pid
-    pid="$(read_pid "$VM")"
+    pid="$(read_pid "$target")"
     if is_pid_alive "$pid"; then
         error "VM is still running (pid=$pid). Run 'vm.sh kill' first."
         exit 1
     fi
-    local target="$VM"
     case "$target" in
         "$PRJ"/profiles/*/vms/*) ;;
         *)

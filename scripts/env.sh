@@ -93,14 +93,15 @@ _envlx_print_current() {
         fi
     fi
 
-    # Restore-command hint: copy/paste into another shell to reproduce.
+    # Restore command on its own last line: bare command, no prefix, so it
+    # can be selected/copied in one go and pasted into another shell.
     if [ -n "${PROFILE:-}" ]; then
         local _restore="source \$SCRIPTS/env.sh --profile $(basename "$PROFILE")"
         if [ -n "${VM:-}" ]; then
             _restore="$_restore --vm $(basename "$VM")"
         fi
         echo
-        echo "Restore: $_restore"
+        echo "$_restore"
     fi
 }
 
@@ -203,12 +204,14 @@ envlx() {
 }
 
 # `vm`: dispatcher for $SCRIPTS/vm.sh. Auto-unsets vm scope after a successful
-# `vm rm` (which subprocess vm.sh cannot do for the parent shell).
+# `vm kill` / `vm rm` (which the subprocess cannot do for the parent shell).
 vm() {
     "$SCRIPTS/vm.sh" "$@"
     local _rc=$?
-    if [ "$_rc" -eq 0 ] && [ "${1:-}" = "rm" ]; then
-        _envlx_unset_vm_scope
+    if [ "$_rc" -eq 0 ]; then
+        case "${1:-}" in
+            kill|rm) _envlx_unset_vm_scope ;;
+        esac
     fi
     return $_rc
 }
@@ -398,6 +401,17 @@ done
 # ---------------------------------------------------------------------------
 
 if [ "$_envlx_no_args" -eq 1 ]; then
+    # Refresh from on-disk metadata so stale shell state (e.g. SSH_PORT from a
+    # prior `vm run vm1` that was later killed and re-run) is replaced with the
+    # current vm.sh / profile.sh values.
+    if [ -n "${PROFILE_SH:-}" ] && [ -f "$PROFILE_SH" ]; then
+        # shellcheck disable=SC1090
+        source "$PROFILE_SH"
+    fi
+    if [ -n "${VM_SH:-}" ] && [ -f "$VM_SH" ]; then
+        # shellcheck disable=SC1090
+        source "$VM_SH"
+    fi
     _envlx_print_current
     unset _envlx_profile_arg _envlx_vm_arg _envlx_reset _envlx_no_args
     return 0

@@ -77,6 +77,17 @@ $SCRIPTS/vm.sh ls --json    # registered profiles
 $SCRIPTS/vm.sh ps --json    # live VMs across all profiles
 ```
 
-## More detail
+## VM naming convention
 
-TODO
+When launching a VM with `vm.sh run <v>`, **always use the form
+`<task>_<timestamp>`** so collisions with the user's or other agents' VMs
+are structurally impossible.
+
+```bash
+$SCRIPTS/vm.sh run repro-cve50264_$(date +%s)
+$SCRIPTS/vm.sh run bisect_$(date +%s)
+```
+
+`<task>` describes the purpose (lowercase, short, hyphenated). `<timestamp>`
+is `$(date +%s)` (Unix epoch). Generic single-letter names like `a`, `vm`,
+`vm1` are the user's space — never use them.
