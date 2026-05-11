@@ -1,0 +1,313 @@
+# linux-env: profile + vm 재설계 지시
+
+VM/커널 작업 흐름을 docker-style **profile (이미지) + vm (컨테이너)** 모델로 재설계한다. `prompt_init` 의 자유 메모를 정제한 구현 지시서. prompt 는 한글이지만, 내부 구현 및 메시지 등은 모두 영어로 작성한다.
+
+## 1. 배경
+
+`SRC=… OBJ=… source envsetup.sh` → `eval "$(run-vm.sh)"` → `vm.sh ssh $SSH_PORT …` 처럼 매번 환경변수를 손으로 넘겨야 하는 흐름을, `source env.sh --profile <p> [--vm <v>]` 한 번으로 컨텍스트를 잡고 이후 `vm.sh ssh`, `kernel.sh --build` 가 무인자로 동작하도록 바꾼다.
+
+## 2. 핵심 원칙
+
+1. 컨텍스트는 *현재 profile* 과 *현재 vm* 둘 뿐. 환경변수로만 표현.
+2. 환경 세팅은 `env.sh` 한 곳에서만. 다른 스크립트는 prefix 환경변수를 요구하지 않는다.
+3. 세팅 이후 명령은 대부분 무인자 동작.
+4. 컨텍스트 전환은 항상 unset → set.
+5. 하나의 profile 위에 여러 vm. 한 profile 의 한 vm_name 은 동시에 하나만.
+6. `$PROFILE` / `$VM` = 디렉토리 절대경로, `$PROFILE_SH` / `$VM_SH` = 그 안의 `.sh` 절대경로.
+7. vm 의 pid 는 `$VM/vm.pid` 파일에 저장. 해당 pid 를 기준으로 vm 상태 판단 (alive/dead).
+
+## 3. 개념 모델
+
+| docker         | linux-env                              |
+|----------------|----------------------------------------|
+| image          | profile (KSRC/KOBJ 또는 KIMAGE 묶음)   |
+| container      | vm (profile 위의 QEMU 인스턴스)        |
+| `docker ps`    | `vm.sh ps` (살아있는 vm)               |
+| `docker images`| `vm.sh ls` (등록된 profile)            |
+| `docker run`   | `vm.sh run <vm_name>`                  |
+
+## 4. 디렉토리 레이아웃
+
+```
+$PRJ/
+├── profiles/
+│   └── <profile_name>/        # = $PROFILE
+│       ├── profile.sh         # = $PROFILE_SH (§5.2)
+│       └── vms/<vm_name>/     # = $VM
+│           ├── vm.sh          # = $VM_SH (§5.3)
+│           ├── vm.pid         # QEMU PID
+│           ├── boot.log       # 직렬 콘솔
+│           └── …
+├── scripts/
+│   ├── env.sh                 # 신규. source 전용, 컨텍스트 진입.
+│   ├── kernel.sh              # 신규. 커널 빌드/설정.
+│   ├── vm.sh                  # 수정. docker-style 서브커맨드.
+│   ├── envsetup.sh            # 보존 (레퍼런스, 호출 안 함).
+│   ├── run-vm.sh              # 보존 (레퍼런스, 호출 안 함).
+│   └── ssh.sh, scp.sh, .common.sh
+├── configs/, images/, share/, syzkaller/
+└── …
+```
+
+`envsetup.sh` / `run-vm.sh` 는 **수정·삭제 금지**. 새 코드 경로는 옛 스크립트에 의존하지 않는다 (정책만 흡수).
+
+## 5. 환경변수 명세
+
+세 층: **글로벌**(항상), **profile 스코프**(profile 진입 시), **vm 스코프**(vm 진입 시; profile 위에서만).
+
+### 5.1 글로벌
+
+| 변수          | 값                       |
+|---------------|--------------------------|
+| `$PRJ`        | 프로젝트 루트 (자동 감지)|
+| `$SCRIPTS`    | `$PRJ/scripts`           |
+| `$CONFIGS`    | `$PRJ/configs`           |
+| `$IMAGES`     | `$PRJ/images`            |
+| `$SHARE`      | `$PRJ/share`             |
+| `$SYZKALLER`  | `$PRJ/syzkaller`         |
+
+`env.sh` 가 처음 source 될 때 위 변수들 모두 force export. 기존 값 override.
+
+### 5.2 profile 스코프
+
+| 변수           | 의미                                 | 필수                |
+|----------------|--------------------------------------|---------------------|
+| `$PROFILE`     | profile 디렉토리 절대경로            | (자동)              |
+| `$PROFILE_SH`  | `$PROFILE/profile.sh`                | (자동)              |
+| `$ARCH`        | 커널 아키텍처 (예: `x86_64`)         | 필수                |
+| `$LLVM`        | LLVM 사용 (`1` / `-19` / `0` → gcc)  | 필수                |
+| `$FS`          | 루트 이미지 디렉토리                 | 필수                |
+| `$KSRC`        | 커널 소스 트리                       | 변형 A 필수 / B 선택|
+| `$KOBJ`        | 커널 빌드 디렉토리                   | 변형 A 필수         |
+| `$KIMAGE`      | bzImage 경로                         | 변형 B 필수         |
+
+- **변형 A (소스 빌드형)**: `KSRC` + `KOBJ` 필수.
+- **변형 B (이미지 직접 지정형)**: `KIMAGE` 필수. `KSRC` 는 gdb 매핑용으로 선택.
+
+`env.sh --profile <name>` 진입 직후 필수 변수 검증, 누락 시 명확한 에러로 중단.
+
+`profile.sh` 부재 시: 디렉토리와 빈 template (`export ARCH=` / `export LLVM=` / `export FS=` / `export KSRC=` / `export KOBJ=` 골격) 을 자동 생성하고, "값을 채운 뒤 다시 `source env.sh --profile <name>` 하세요" 안내를 출력한 뒤 **정상 종료**. 셸은 unset 단계만 거친 깨끗한 상태로 남는다.
+
+`profile.sh` 예 (변형 A):
+
+```sh
+export ARCH=x86_64
+export LLVM=1
+export FS="$IMAGES/x64"
+export KSRC="$PRJ/kernels/linux-6.12.y"
+export KOBJ="$KSRC/build/debug"
+```
+
+### 5.3 vm 스코프
+
+| 변수         | 의미                  |
+|--------------|-----------------------|
+| `$VM`        | vm 디렉토리 절대경로  |
+| `$VM_SH`     | `$VM/vm.sh`           |
+| `$SSH_PORT`  | 호스트 SSH 포트       |
+| `$GDB_PORT`  | 호스트 gdbstub 포트   |
+
+`vm.sh` 는 `vm.sh run <vm_name>` 시 자동 생성, `SSH_PORT`/`GDB_PORT`/메타를 export. PID 는 `$VM/vm.pid`. vm 스코프는 profile 위에서만 유효.
+
+## 6. `scripts/env.sh`
+
+source 전용. 직접 실행 시 안내 + 비제로 종료.
+
+### 6.1 사용법
+
+```bash
+source $SCRIPTS/env.sh                          # 글로벌 보장 + (있으면) 현재 컨텍스트 출력
+source $SCRIPTS/env.sh --profile <p>            # profile 진입
+source $SCRIPTS/env.sh --vm <v>                 # 현재 profile 안에서 vm 진입
+source $SCRIPTS/env.sh --profile <p> --vm <v>   # 한 번에 둘 다
+source $SCRIPTS/env.sh --reset                  # profile/vm 비움 (글로벌 유지)
+```
+
+### 6.2 동작 규약 (모든 호출은 unset → set)
+
+- `--profile <name>`:
+  1. vm 스코프 unset: `VM`, `VM_SH`, `SSH_PORT`, `GDB_PORT`.
+  2. profile 스코프 unset: `PROFILE`, `PROFILE_SH`, `KSRC`, `KOBJ`, `KIMAGE`, `ARCH`, `LLVM`, `FS`.
+  3. `$PRJ/profiles/<name>/profile.sh` 부재 시 §5.2 정책 (template 자동 생성 + 안내 + 정상 종료) 에 따라 처리. 이후 단계는 진행하지 않는다.
+  4. `export PROFILE="$PRJ/profiles/<name>"` / `export PROFILE_SH="$PROFILE/profile.sh"` 후 `source "$PROFILE_SH"`.
+  5. 필수 변수 검증, 누락 시 에러.
+
+- `--vm <name>`:
+  1. `$PROFILE` 미설정이면 에러.
+  2. vm 스코프 unset.
+  3. `$PROFILE/vms/<name>/vm.sh` 부재 시 에러: "vm.sh run <name> 으로 띄우세요".
+  4. `export VM="$PROFILE/vms/<name>"` / `export VM_SH="$VM/vm.sh"` 후 `source "$VM_SH"`.
+
+- `--profile <p> --vm <v>`: 위 둘을 순서대로. profile 단계 실패 시 vm 단계 미실행, 셸은 깨끗한 상태.
+- `--reset`: 두 스코프 unset, 글로벌 유지.
+- 인자 없음: 글로벌 보장 + 현재 컨텍스트 출력.
+
+### 6.3 글로벌 + 헬퍼 정의
+
+`env.sh` 는 `$BASH_SOURCE` 로부터 `$PRJ` 추정, 미설정인 §5.1 6 변수를 export. 동시에 §10 헬퍼 함수들을 정의/export.
+
+## 7. `scripts/kernel.sh`
+
+profile 컨텍스트 위에서 동작. `KSRC` 부재 (변형 B) 시 빌드 명령은 에러.
+
+```
+kernel.sh --help
+kernel.sh --menuconfig          # make -C $KSRC O=$KOBJ menuconfig (ARCH/LLVM 자동 주입)
+kernel.sh --olddefconfig
+kernel.sh --kctfconfig          # $CONFIGS/kernelctf.config 을 $KOBJ/.config 으로 복사
+kernel.sh --build [-j N]        # 기본 -j 16, -j N 으로 override
+kernel.sh --clang               # gen_compile_commands.py 후 $KSRC/.clangd 없으면 $CONFIGS/.clangd 복사
+```
+
+`ARCH`/`LLVM` 은 profile 에서 들어옴. `CROSS_COMPILE` 은 `envsetup.sh` 의 정책을 자체적으로 답습 (호출 X).
+
+## 8. `scripts/vm.sh`
+
+기존 파일 **수정**. 두 종류: 컨텍스트-독립 서브커맨드와 vm 컨텍스트 액션.
+
+### 8.1 컨텍스트-독립
+
+| 명령                       | 설명                                                                  |
+|----------------------------|-----------------------------------------------------------------------|
+| `vm.sh ls` / `ls --json`   | 등록된 profile 정적 정보 (KSRC/KOBJ 또는 KIMAGE, FS, ARCH, LLVM).      |
+| `vm.sh ps` / `ps --json`   | 살아있는 vm 목록. 컬럼: PROFILE, VM, SSH_PORT, GDB_PORT, PID, STARTED, KIMAGE. |
+| `vm.sh help`               | 사용법.                                                               |
+
+`ps` 는 `$PRJ/profiles/*/vms/*/vm.pid` 를 스캔, `/proc/$PID` 로 liveness 확인 → 살아있는 것만 표시. 죽은 vm 디렉토리는 자동 정리하지 않음 — `vm.sh rm` 으로 명시적 정리 (§8.3).
+
+그리고 `vm` 이라는 명령이 $SCRIPTS/vm.sh 에 대한 alias 혹은 function 으로 동작하도록 할 것.
+e.g., $SCRIPTS/vm.sh ls -> vm ls
+
+### 8.2 profile 컨텍스트 필요
+
+| 명령                  | 설명                                                                                   |
+|-----------------------|----------------------------------------------------------------------------------------|
+| `vm.sh run <vm_name>` | `$PROFILE/vms/<vm_name>/` 디렉토리 생성 (있으면 재사용). 빈 SSH/GDB 포트 페어 자동 할당. 산출물: `vm.sh`, `vm.pid`, `boot.log` (덮어씀). tmux 백그라운드 실행 (§9). 성공 시 stdout 마지막에 안내: `Run: $SCRIPTS/env.sh --profile <profile_name> --vm <vm_name>`. |
+
+같은 이름이 살아 있으면 에러. 죽어 있으면 (PID 가 `/proc` 에 없으면) 재사용해 부팅. 완전 초기화는 `vm.sh rm` 후 `run`.
+
+
+### 8.3 vm 컨텍스트 필요
+
+`$VM` / `$VM_SH` / `$SSH_PORT` / `$GDB_PORT` 가 모두 환경에 있어야 동작. 없으면 안내 에러. PID 가 필요한 액션(`kill`, `rm`) 은 `$VM/vm.pid` 를 읽는다.
+
+| 명령                       | 설명                                                                                  |
+|----------------------------|---------------------------------------------------------------------------------------|
+| `vm.sh ssh [<cmd>...]`     | SSH 접속. `ssh` 뒤의 모든 argv 가 원격에서 실행할 명령으로 그대로 넘어간다 (없으면 인터랙티브 셸). |
+| `vm.sh scp <src> <dst>`    | 양방향 SCP. `vm:/path` 표기로 원격 측 지정.                                            |
+| `vm.sh gdb`                | gdbstub attach. `KSRC`/`KOBJ` 있으면 vmlinux 자동 로드.                                |
+| `vm.sh attach`             | tmux 윈도우 attach.                                                                    |
+| `vm.sh kill`               | `$VM/vm.pid` 의 PID 종료, tmux 윈도우 close. 디렉토리 보존. PID 죽었거나 vm.pid 없으면 no-op. |
+| `vm.sh rm`                 | `$VM` 디렉토리 통째 삭제. PID 가 살아 있으면 거부 (먼저 `kill`). subprocess 인 vm.sh 자체로는 부모 셸 env 를 못 지우므로, 호출 후 vm 스코프 환경변수를 자동 정리하려면 §10 의 `vm` 셸 함수(`vm rm`) 를 사용. |
+| `vm.sh log [-f]`           | `$VM/boot.log` 출력. 디렉토리만 살아 있으면 vm 이 죽어도 동작.                         |
+
+기존 `--list/--ssh/--kill/--gdb/--attach/--scp/-i/-e` 인터페이스는 **모두 제거**. `commands.txt` 와 `CLAUDE.md` 의 "Agent quickstart (VM 관리)" 절도 갱신.
+
+## 9. tmux 세션/윈도우
+
+- profile 별 세션: `vms_<profile_name>` (없으면 생성).
+- vm 별 윈도우: `<vm_name>`.
+- `vm.sh attach` → `tmux attach -t vms_<p>:<v>`.
+- `vm.sh kill` → 윈도우 close, 세션이 비면 세션도 close.
+
+## 10. 헬퍼 함수
+
+`env.sh` source 시 정의:
+
+- `envlx`: 현재 컨텍스트 출력. profile 미설정 → `(no profile)`, vm 미설정 → `(no vm)`. 한 줄 요약 + 들여쓰기 상세 (KSRC/KOBJ/KIMAGE/FS/ARCH/LLVM, SSH_PORT/GDB_PORT). PID 는 `$VM/vm.pid` 에서 읽어 alive/dead 표기. (이름 `env` 가 아닌 `envlx` 인 이유: `/usr/bin/env` 셰도우 회피.)
+   - envlx 가 사실상 $SCRIPTS/env.sh 의 alias 역할로, envlx --profile <p> --vm <v> 식으로 컨텍스트 전환과 동시에 출력도 하도록 할 수 있다. 처음에만 source ..../env.sh 하고나면, 그 뒤로는 envlx 를 쓰는 게 더욱 편리하므로.
+- `vm`: `$SCRIPTS/vm.sh` 의 dispatcher 셸 함수. 기본 동작은 `$SCRIPTS/vm.sh "$@"` 위임. 단 `vm rm` 은 vm.sh 가 성공한 직후 현재 셸의 vm 스코프 환경변수(`VM`, `VM_SH`, `SSH_PORT`, `GDB_PORT`) 를 `unset` 한다. 이걸로 사용자가 별도 `--reset` 을 누르지 않아도 stale 컨텍스트를 남기지 않는다. 다른 서브커맨드(`ls`/`ps`/`run`/`ssh`/...) 는 그냥 위임만.
+- `lsfs` / `setfs` / `mkfs`: `$IMAGES` 기반. profile 컨텍스트와 무관하게 동작.
+- `vmhttp`: envsetup.sh 의 `vmhttp` 를 답습. profile/vm 컨텍스트와 무관하게 동작.
+
+## 11. 기존 스크립트와의 관계
+
+- `envsetup.sh`, `run-vm.sh`: 수정·삭제 금지, 호출 안 함.
+- `vm.sh`: 본 문서대로 수정. 기존 인터페이스 제거.
+- `ssh.sh`, `scp.sh`, `.common.sh`: 자유롭게 호출.
+- `commands.txt`, `CLAUDE.md` ("Agent quickstart"): 갱신.
+
+## 12. 수락 기준
+
+다음 시나리오가 깨끗하게 동작하면 완료:
+
+1. **profile 정의**
+
+   ```bash
+   mkdir -p $PRJ/profiles/lts-6.12/vms
+   cat > $PRJ/profiles/lts-6.12/profile.sh <<'EOF'
+   export ARCH=x86_64
+   export LLVM=1
+   export FS="$IMAGES/x64"
+   export KSRC="$PRJ/kernels/linux-6.12.y"
+   export KOBJ="$KSRC/build/debug"
+   EOF
+   ```
+
+2. **profile 진입 + 빌드**
+
+   ```bash
+   source $SCRIPTS/env.sh --profile lts-6.12        # PROFILE/PROFILE_SH set, VM=(none)
+   $SCRIPTS/kernel.sh --olddefconfig
+   $SCRIPTS/kernel.sh --build
+   ```
+
+3. **vm 부팅 + 진입**
+
+   ```bash
+   $SCRIPTS/vm.sh run a
+   source $SCRIPTS/env.sh --vm a                    # VM/VM_SH/SSH_PORT/GDB_PORT, PID=<n> alive
+   $SCRIPTS/vm.sh ssh uname -r
+   $SCRIPTS/vm.sh log | tail
+   ```
+
+4. **두 번째 vm 동시 운용**
+
+   ```bash
+   $SCRIPTS/vm.sh run b
+   $SCRIPTS/vm.sh ps                                # a, b 모두
+   source $SCRIPTS/env.sh --vm b
+   ```
+
+5. **다른 profile 로 전환**
+
+   ```bash
+   source $SCRIPTS/env.sh --profile kctf-6.12.79
+   $SCRIPTS/vm.sh ls; $SCRIPTS/vm.sh ps             # 두 profile 모두, vm a/b/x 전부
+   $SCRIPTS/vm.sh run x; source $SCRIPTS/env.sh --vm x
+   ```
+
+6. **kill / rm 차이**
+
+   ```bash
+   $SCRIPTS/vm.sh kill                              # QEMU 만 종료, 디렉토리 보존
+   $SCRIPTS/vm.sh ps                                # 사라짐
+   ls $VM                                           # boot.log 등 살아있음
+   $SCRIPTS/vm.sh rm                                # 디렉토리 삭제
+   source $SCRIPTS/env.sh --profile lts-6.12 --vm a # 한 번에 둘 다
+   $SCRIPTS/vm.sh kill && $SCRIPTS/vm.sh rm
+   source $SCRIPTS/env.sh --vm b
+   $SCRIPTS/vm.sh kill && $SCRIPTS/vm.sh rm
+   $SCRIPTS/vm.sh ps                                # 비어 있음
+   ```
+
+7. **재사용 / 덮어쓰기**
+
+   ```bash
+   $SCRIPTS/vm.sh run a; $SCRIPTS/vm.sh kill
+   $SCRIPTS/vm.sh run a                             # boot.log 덮어쓰기
+   ```
+
+확인 항목:
+- profile 전환 시 KSRC/KOBJ/KIMAGE/ARCH/LLVM/FS 환경변수 누수 없음.
+- `$PROFILE`/`$VM` 은 디렉토리, `$PROFILE_SH`/`$VM_SH` 는 `.sh` 절대경로.
+- PID 는 `$VM/vm.pid` 가 단일 진실 원천.
+- `kill` 후 디렉토리 살아있고, `rm` 후에야 사라짐.
+- 같은 이름 `run` 시 boot.log 덮어쓰기.
+- tmux 이름이 `vms_<p>:<v>` 규칙.
+
+## 13. 보류 (non-goals)
+
+- 한 profile.sh 에서 여러 vm 미리 정의: 추후.
+- 원격 호스트 / profile 공유 / 동시성 lock: 범위 외.
+- JSON 형식 profile: 미지원.
