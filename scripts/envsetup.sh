@@ -24,9 +24,10 @@ source "$SCRIPTS/.common.sh"
 
 export DEF_ARCH="x86_64"
 export DEF_CC="llvm-19"
-export DEF_SSH_PORT=22222
 export IMAGES="$PRJ/images"
 export CONFIGS="$PRJ/configs"
+export LOGS="$PRJ/logs"
+mkdir -p "$LOGS" 2>/dev/null || true
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 1) ARCH setup
@@ -52,7 +53,11 @@ export PATCHES="$PRJ/patches"
 # commands
 
 function current() {
-    local CMD="ARCH=$ARCH CC=$CC KSRC=$KSRC KOBJ=$KOBJ FS=$FS SSH_PORT=$SSH_PORT source $SCRIPTS/envsetup.sh"
+    local CMD="ARCH=$ARCH CC=$CC KSRC=$KSRC KOBJ=$KOBJ FS=$FS"
+    if [ -n "${SSH_PORT:-}" ]; then
+        CMD="SSH_PORT=$SSH_PORT $CMD"
+    fi
+    CMD="$CMD source $SCRIPTS/envsetup.sh"
     case "$1" in
         -x)
             echo $CMD | clip
@@ -105,9 +110,14 @@ function print_info() {
     else
         warn "FS:       (not set) Use 'lsfs' / 'setfs <name>' / 'mkfs <name>'"
     fi
-    info "SSH_PORT: $SSH_PORT"
-    info "GDB_PORT: $GDB_PORT"
+    if [ -n "${SSH_PORT:-}" ]; then
+        info "SSH_PORT: $SSH_PORT"
+        info "GDB_PORT: ${GDB_PORT:-$((SSH_PORT - 20000))}"
+    else
+        info "SSH_PORT: (unset; auto-allocated by run-vm.sh)"
+    fi
     info "SHARE:    $SHARE"
+    info "LOGS:     $LOGS"
 }
 
 function lsfs() {
@@ -289,7 +299,7 @@ function vmhttp() {
 
     dir="$(realpath "$dir")"
     info "Serving $dir on port $port"
-    info "Guest: curl -O 10.0.2.2:$port/<filename>"
+    info "curl -O 10.0.2.2:$port/<filename>"
     python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir"
 }
 
@@ -337,18 +347,10 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6) SSH_PORT / GDB_PORT setup
-#    GDB_PORT = SSH_PORT - 20000 (always computed, GDB_PORT input is ignored)
+# 6) SSH_PORT / GDB_PORT
+#    Allocation moved to run-vm.sh. envsetup.sh only preserves an existing
+#    SSH_PORT/GDB_PORT in the environment if the caller set one explicitly.
 # ──────────────────────────────────────────────────────────────────────────────
-if [ -z "$SSH_PORT" ] || [ "$SSH_PORT" == "" ]; then
-    SSH_PORT="$DEF_SSH_PORT"
-fi
-force_export "SSH_PORT" "$SSH_PORT"
-force_export "GDB_PORT" "$(( SSH_PORT - 20000 ))"
-if [ "$GDB_PORT" -le 0 ]; then
-    error "Error: SSH_PORT $SSH_PORT is too small (must be > 20000, GDB_PORT would be $GDB_PORT)"
-    return 1
-fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 8) CC override (CC > default: llvm-19)

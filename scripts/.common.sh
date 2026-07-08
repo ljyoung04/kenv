@@ -3,16 +3,17 @@ WARN='\033[1;33m'  # Yellow (warning color)
 ERROR='\033[1;31m' # Red (error color)
 RESET='\033[0m'     # Reset to default color
 
-# Function to print messages in color
+# Diagnostic helpers go to stderr so stdout stays clean for callers that want
+# to capture machine-readable output (e.g. `eval $(run-vm.sh)`).
 info() {
-    echo -e "[*] ${INFO}$1${RESET}"
+    echo -e "[*] ${INFO}$1${RESET}" >&2
 }
 warn() {
-    echo -e "[!] ${WARN}$1${RESET}"
+    echo -e "[!] ${WARN}$1${RESET}" >&2
 }
 
 error() {
-    echo -e "[-] ${ERROR}$1${RESET}"
+    echo -e "[-] ${ERROR}$1${RESET}" >&2
 }
 
 check_port_available() {

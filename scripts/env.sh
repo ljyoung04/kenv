@@ -113,7 +113,7 @@ _envlx_make_template() {
 # Required (all profiles):
 export ARCH=x86_64
 export LLVM=1
-export FS=
+export FS=$IMAGES/x64
 
 # Variant A (build kernel from source) -- uncomment KSRC + KOBJ:
 #export KSRC=
@@ -208,18 +208,46 @@ envlx() {
 # them. vm.sh itself is strict and ignores inherited env; the explicit flags
 # come from here.
 #
-# Translation per subcommand:
+# Optional leading `-p <profile>` / `-v <vm>` flags (before the subcommand)
+# override the current scope for that single call only — the shell's
+# $PROFILE/$VM are left untouched (one-shot). Example:
+#   vm -p kctf-6.12.67 -v vm1 ssh -- uname -a
+#
+# Translation per subcommand (P/V = effective profile/vm: override else scope):
 #   vm ls / ps / help          → vm.sh ls / ps / help                 (no flags)
-#   vm run <name> [opts]       → vm.sh -p $P run <name> [opts]        (needs $PROFILE)
-#   vm rm <name>               → vm.sh -p $P -v <name> rm             (positional → -v)
+#   vm run <name> [opts]       → vm.sh -p P run <name> [opts]         (needs P)
+#   vm -v <name> run [opts]    → vm.sh -p P run <name> [opts]         (==above; both = error)
+#   vm rm <name>               → vm.sh -p P -v <name> rm             (positional → -v)
 #   vm ssh|scp|gdb|attach|kill|log [args] →
-#                                vm.sh -p $P -v $V <subcmd> [args]   (needs $PROFILE+$VM)
+#                                vm.sh -p P -v V <subcmd> [args]      (needs P+V)
 #
 # After a successful operation on the VM in this shell's scope, the shim
 # unsets vm-scope env vars (subprocess vm.sh cannot do that for the parent):
-#   - `vm kill`                  → unset (operates on current $VM)
+#   - `vm kill`                  → unset (when killing the current $VM)
 #   - `vm rm <name>` where <name> matches $(basename "$VM") → unset.
+# An override that targets a different profile/vm never touches the scope.
 vm() {
+    # Optional leading -p/-v overrides (must precede the subcommand). One-shot:
+    # they only change flags forwarded to vm.sh; $PROFILE/$VM scope is untouched.
+    local _p_override="" _v_override=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -p|--profile)
+                [ "$#" -lt 2 ] && { error "vm: -p requires <profile>"; return 2; }
+                _p_override="$2"; shift 2 ;;
+            -v|--vm)
+                [ "$#" -lt 2 ] && { error "vm: -v requires <vm>"; return 2; }
+                _v_override="$2"; shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    # Effective names: override wins, else current shell scope.
+    local _p="$_p_override"
+    [ -z "$_p" ] && [ -n "${PROFILE:-}" ] && _p="$(basename "$PROFILE")"
+    local _v="$_v_override"
+    [ -z "$_v" ] && [ -n "${VM:-}" ] && _v="$(basename "$VM")"
+
     local subcmd="${1:-}"
     if [ -z "$subcmd" ]; then
         "$SCRIPTS/vm.sh" help
@@ -231,43 +259,70 @@ vm() {
             "$SCRIPTS/vm.sh" "$@" || _rc=$?
             ;;
         run)
-            if [ -z "${PROFILE:-}" ]; then
-                error "vm run: no \$PROFILE; run \`envlx --profile <name>\` first"
+            if [ -z "$_p" ]; then
+                error "vm run: no profile; pass -p <name> or run \`envlx --profile <name>\` first"
                 return 2
             fi
             shift
-            "$SCRIPTS/vm.sh" -p "$(basename "$PROFILE")" run "$@" || _rc=$?
+            # -v override supplies the run target name; a positional name also
+            # works, but both at once is ambiguous.
+            local _has_pos=0 _a
+            for _a in "$@"; do
+                case "$_a" in -*) ;; *) _has_pos=1; break ;; esac
+            done
+            if [ -n "$_v_override" ] && [ "$_has_pos" -eq 1 ]; then
+                error "vm run: both -v <name> and a positional name given; use one"
+                return 2
+            fi
+            if [ -n "$_v_override" ]; then
+                "$SCRIPTS/vm.sh" -p "$_p" run "$_v_override" "$@" || _rc=$?
+            else
+                "$SCRIPTS/vm.sh" -p "$_p" run "$@" || _rc=$?
+            fi
             ;;
         rm)
+            if [ -z "$_p" ]; then
+                error "vm rm: no profile; pass -p <name> or run \`envlx --profile <name>\` first"
+                return 2
+            fi
             shift
             local _target="${1:-}"
+            [ -n "$_target" ] && shift
+            if [ -n "$_v_override" ]; then
+                if [ -n "$_target" ]; then
+                    error "vm rm: both -v <name> and a positional name given; use one"
+                    return 2
+                fi
+                _target="$_v_override"
+            fi
             if [ -z "$_target" ]; then
-                error "usage: vm rm <vm_name>"
+                error "usage: vm [-p <profile>] rm <vm_name>   (or -v <vm_name>)"
                 return 2
             fi
-            shift
-            if [ -z "${PROFILE:-}" ]; then
-                error "vm rm: no \$PROFILE; run \`envlx --profile <name>\` first"
-                return 2
-            fi
-            "$SCRIPTS/vm.sh" -p "$(basename "$PROFILE")" -v "$_target" rm "$@" || _rc=$?
-            if [ "$_rc" -eq 0 ] && [ -n "${VM:-}" ] && [ "$_target" = "$(basename "$VM")" ]; then
+            "$SCRIPTS/vm.sh" -p "$_p" -v "$_target" rm "$@" || _rc=$?
+            # Only unset shell scope if we removed the VM the scope points to.
+            if [ "$_rc" -eq 0 ] && [ -n "${PROFILE:-}" ] && [ -n "${VM:-}" ] \
+               && [ "$_p" = "$(basename "$PROFILE")" ] && [ "$_target" = "$(basename "$VM")" ]; then
                 _envlx_unset_vm_scope
             fi
             ;;
         ssh|scp|gdb|attach|kill|log)
-            if [ -z "${PROFILE:-}" ] || [ -z "${VM:-}" ]; then
-                error "vm $subcmd: no \$PROFILE/\$VM; run \`envlx --profile <p> --vm <v>\` first"
+            if [ -z "$_p" ] || [ -z "$_v" ]; then
+                error "vm $subcmd: no profile/vm; pass -p <p> -v <v> or run \`envlx --profile <p> --vm <v>\` first"
                 return 2
             fi
             shift
-            "$SCRIPTS/vm.sh" -p "$(basename "$PROFILE")" -v "$(basename "$VM")" "$subcmd" "$@" || _rc=$?
-            if [ "$_rc" -eq 0 ] && [ "$subcmd" = "kill" ]; then
+            "$SCRIPTS/vm.sh" -p "$_p" -v "$_v" "$subcmd" "$@" || _rc=$?
+            if [ "$_rc" -eq 0 ] && [ "$subcmd" = "kill" ] && [ -n "${PROFILE:-}" ] && [ -n "${VM:-}" ] \
+               && [ "$_p" = "$(basename "$PROFILE")" ] && [ "$_v" = "$(basename "$VM")" ]; then
                 _envlx_unset_vm_scope
             fi
             ;;
         *)
-            "$SCRIPTS/vm.sh" "$@" || _rc=$?
+            local _flags=()
+            [ -n "$_p_override" ] && _flags+=(-p "$_p_override")
+            [ -n "$_v_override" ] && _flags+=(-v "$_v_override")
+            "$SCRIPTS/vm.sh" "${_flags[@]}" "$@" || _rc=$?
             ;;
     esac
     return $_rc
@@ -425,18 +480,18 @@ _envlx_no_args=1
 while [ $# -gt 0 ]; do
     _envlx_no_args=0
     case "$1" in
-        --profile)
+        -p|--profile)
             if [ "$#" -lt 2 ]; then
-                error "--profile requires <name>"
+                error "-p/--profile requires <name>"
                 unset _envlx_profile_arg _envlx_vm_arg _envlx_reset _envlx_no_args
                 return 1
             fi
             _envlx_profile_arg="$2"
             shift 2
             ;;
-        --vm)
+        -v|--vm)
             if [ "$#" -lt 2 ]; then
-                error "--vm requires <name>"
+                error "-v/--vm requires <name>"
                 unset _envlx_profile_arg _envlx_vm_arg _envlx_reset _envlx_no_args
                 return 1
             fi
@@ -449,10 +504,10 @@ while [ $# -gt 0 ]; do
             ;;
         -h|--help)
             cat <<'EOF'
-Usage: source env.sh [args]
-  --profile <name>            enter profile
-  --vm <name>                 enter vm (requires profile context)
-  --profile <p> --vm <v>      enter both at once
+Usage: source env.sh [args]   (a.k.a. envlx [args])
+  -p, --profile <name>        enter profile
+  -v, --vm <name>             enter vm (requires profile context)
+  -p <p> -v <v>               enter both at once
   --reset                     clear profile/vm scope (keep globals)
   (no args)                   show current context
 EOF

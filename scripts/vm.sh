@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# linux-env: vm management. Stateless CLI — profile/vm scope is always passed
+# linux-env: vm management. Stateless CLI - profile/vm scope is always passed
 # explicitly via -p/-v flags. Inherited env from the parent shell is ignored;
 # `vm.sh` always starts with a clean profile/vm scope (PRJ stays since it's
 # the project root).
@@ -37,6 +37,8 @@ Profile required (-p):
   run <vm_name> [opts]     Boot a new VM under -p. opts:
                              --shared   enable 9p host_share
                              --kaslr    enable KASLR (default: nokaslr)
+                             --android  device-matched env (Pixel 10 6.6.82):
+                                        8 cpu, 12G, rcu_nocbs=all + expedited
 
 Profile + vm required (-p -v):
   ssh [-- <cmd>...]        SSH into the VM (no args → interactive shell). The
@@ -335,10 +337,12 @@ cmd_run() {
     local vm_name=""
     local enable_shared=false
     local enable_kaslr=false
+    local android_mode=false
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --shared) enable_shared=true; shift ;;
-            --kaslr)  enable_kaslr=true;  shift ;;
+            --shared)  enable_shared=true; shift ;;
+            --kaslr)   enable_kaslr=true;  shift ;;
+            --android) android_mode=true;  shift ;;
             --) shift; break ;;
             -*) error "Unknown run option: $1"; exit 2 ;;
             *)
@@ -350,7 +354,7 @@ cmd_run() {
         esac
     done
     if [ -z "$vm_name" ]; then
-        error "usage: vm.sh run <vm_name> [--shared] [--kaslr]"
+        error "usage: vm.sh run <vm_name> [--shared] [--kaslr] [--android]"
         exit 2
     fi
     require_profile
@@ -437,10 +441,22 @@ cmd_run() {
     if [ "$enable_kaslr" = "false" ]; then
         KAPPEND="$KAPPEND nokaslr"
     fi
+    # --android: device-matched runtime (Pixel 10, 6.6.82-android15). Sets
+    # cpu/mem/cmdline to mirror the device. Profile vars SMP/MEM still win
+    # (set only when unset here), so a profile can override per case.
+    if [ "$android_mode" = "true" ]; then
+        : "${SMP:=8}"
+        : "${MEM:=12G}"
+        KAPPEND="$KAPPEND rcu_nocbs=all rcupdate.rcu_expedited=1"
+    fi
+    # Optional profile overrides (default-preserving): SMP, MEM, EXTRA_CMDLINE
+    if [ -n "${EXTRA_CMDLINE:-}" ]; then
+        KAPPEND="$KAPPEND $EXTRA_CMDLINE"
+    fi
     local QEMU_ARGS=(
-        -m 3.5G
+        -m "${MEM:-3.5G}"
         -cpu host
-        -smp 2
+        -smp "${SMP:-2}"
         -kernel "$kernel_image"
         -append "$KAPPEND"
         -drive "file=$FS/bookworm.img,format=raw,snapshot=on,if=virtio"
@@ -522,6 +538,8 @@ cmd_run() {
  TMUX:     $SESSION:$vm_name
  SHARED:   $([ "$enable_shared" = "true" ] && echo "on ($SHARE → /mnt/host_share)" || echo "off")
  KASLR:    $([ "$enable_kaslr" = "true" ] && echo "on" || echo "off (nokaslr)")
+ CPU/MEM:  ${SMP:-2} cpu / ${MEM:-3.5G}
+ ANDROID:  $([ "$android_mode" = "true" ] && echo "on (rcu_nocbs=all, rcu_expedited)" || echo "off")
 =================================================
 Run: envlx --vm $vm_name
 EOF

@@ -21,8 +21,18 @@ if [ ! -f "$KEY" ]; then
     exit 1
 fi
 
-exec ssh -p "$SSH_PORT" \
-    -i "$KEY" \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    root@localhost "$@"
+SSH_OPTS=(
+    -p "$SSH_PORT"
+    -i "$KEY"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+)
+
+# Force pty when running a remote command, so the remote process's stdout is
+# line-buffered (default fully-buffered mode hides output of programs that
+# crash/panic before flushing — e.g. kernel exploit binaries).
+if [ "$#" -gt 0 ]; then
+    SSH_OPTS+=(-t)
+fi
+
+exec ssh "${SSH_OPTS[@]}" root@localhost "$@"

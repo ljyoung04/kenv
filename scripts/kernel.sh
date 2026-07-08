@@ -60,7 +60,10 @@ build_make_args() {
     args+=("-C" "$KSRC" "O=$KOBJ" "ARCH=$ARCH")
     case "${LLVM:-}" in
         ""|"0")
-            # gcc toolchain. arm64 needs CROSS_COMPILE.
+            # gcc toolchain. Pass LLVM= explicitly to override any LLVM=0
+            # that leaked in from the parent env — kernel Makefile treats
+            # any non-empty $(LLVM), including "0", as "use clang".
+            args+=("LLVM=")
             if [ "$ARCH" = "arm64" ] && [ -z "${CROSS_COMPILE:-}" ]; then
                 args+=("CROSS_COMPILE=aarch64-linux-gnu-")
             fi
