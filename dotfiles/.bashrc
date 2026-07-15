@@ -8,7 +8,7 @@ esac
 # oh-my-bash
 # ──────────────────────────────────────────────────────────────────────────────
 export OSH='/opt/oh-my-bash'
-OSH_THEME="demula"
+OSH_THEME="ht"
 
 completions=(
   git
@@ -40,6 +40,6 @@ eval "$(zoxide init bash)"
 # ──────────────────────────────────────────────────────────────────────────────
 # user config
 # ──────────────────────────────────────────────────────────────────────────────
-export EDITOR=vim
+export EDITOR=nano
 
 [ -f ~/.bash_aliases ] && source ~/.bash_aliases

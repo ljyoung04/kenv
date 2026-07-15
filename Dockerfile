@@ -43,7 +43,7 @@ RUN apt-get update && apt-get install -y \
     libgmp-dev \
     libmpfr-dev \
     # utilities
-    vim \
+    nano \
     curl \
     fzf \
     lsof \

@@ -1,4 +1,4 @@
-# CLAUDE.md — agent guide for `linux-env`
+# AGENTS.md — agent guide for `linux-env`
 
 `linux-env` is a QEMU/KVM kernel dev environment with a Docker-style
 **profile (image) + vm (container)** model. State lives on disk; the CLI

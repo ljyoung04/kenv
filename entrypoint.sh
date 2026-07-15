@@ -16,7 +16,7 @@ fi
 
 HOST_UID="${HOST_UID:-1000}"
 HOST_GID="${HOST_GID:-1000}"
-USERNAME="compsec"
+USERNAME="kenv-${HOST_USER:-compsec}"
 
 # Remove existing user/group that conflicts with host IDs
 EXISTING_USER=$(getent passwd "$HOST_UID" 2>/dev/null | cut -d: -f1 || true)

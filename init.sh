@@ -50,10 +50,12 @@ fi
 cat > "$ENV_PATH" <<EOF
 HOST_UID=${HOST_UID}
 HOST_GID=${HOST_GID}
+HOST_USER=${HOST_USER}
 SSH_PORT=${SSH_PORT}
 EOF
 
 info "Generated ${ENV_FILE}:"
 echo "  HOST_UID=${HOST_UID}"
 echo "  HOST_GID=${HOST_GID}"
+echo "  HOST_USER=${HOST_USER}"
 echo "  SSH_PORT=${SSH_PORT}"

@@ -1,7 +1,7 @@
 services:
-  kernel-dev:
+  kenv:
     build: .
-    container_name: linux-env-${HOST_USER}
+    container_name: kenv-${HOST_USER}
     environment:
       - HOST_UID=${HOST_UID}
       - HOST_GID=${HOST_GID}
@@ -14,4 +14,4 @@ services:
     privileged: true  # Required for debootstrap, mount, loopback devices
     working_dir: /workspace
     labels:
-      - "devcontainer.metadata=[{\"remoteUser\": \"compsec\"}]"
+      - "devcontainer.metadata=[{\"remoteUser\": \"kenv-${HOST_USER}\"}]"
