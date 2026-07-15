@@ -38,6 +38,20 @@ if ! id "$USERNAME" > /dev/null 2>&1; then
     useradd -m -u "$HOST_UID" -g "$HOST_GID" -s /bin/bash "$USERNAME"
 fi
 
+# qemu
+
+KVM_GID="$(stat -c %g /dev/kvm)"
+KVM_GROUP="$(getent group "$KVM_GID" | cut -d: -f1)"
+
+if [ -z "$KVM_GROUP" ]; then
+     KVM_GROUP="kvm-device-$KVM_GID"
+    groupadd -g "$KVM_GID" "$KVM_GROUP"
+fi
+
+usermod -aG "$KVM_GROUP" "$USERNAME"
+getent group "$KVM_GID"
+
+
 # Allow passwordless sudo
 echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/"$USERNAME"
 

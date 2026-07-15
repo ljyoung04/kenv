@@ -3,6 +3,7 @@ services:
     build: .
     container_name: kenv-${HOST_USER}
     environment:
+      - HOST_USER=${HOST_USER}
       - HOST_UID=${HOST_UID}
       - HOST_GID=${HOST_GID}
     ports:
