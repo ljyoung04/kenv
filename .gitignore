@@ -34,3 +34,7 @@
 **/out/**
 **/tmp/**
 **/.cache/**
+
+# kctf: keep dir, ignore everything inside
+/kctf/*
+!/kctf/.gitkeep

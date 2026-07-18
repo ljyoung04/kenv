@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
     git \
     python3 \
     python3-pip \
+    bear \
     # debootstrap & image creation
     debootstrap \
     qemu-user-static \
@@ -116,6 +117,11 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /workspace
+
+# kernelctf setting
+RUN git clone --depth=1 https://github.com/google/security-research.git /workspace/kctf/security-research
+
+RUN git clone --depth=1 https://github.com/google/kernel-research.git /workspace/kctf/kernel-research
 
 # Default shell for envsetup.sh compatibility
 SHELL ["/bin/bash", "-c"]
