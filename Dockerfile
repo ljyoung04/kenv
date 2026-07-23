@@ -119,9 +119,9 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 WORKDIR /workspace
 
 # kernelctf setting
-RUN git clone --depth=1 https://github.com/google/security-research.git /workspace/kctf/security-research
+RUN git clone --depth=1 https://github.com/google/security-research.git /workspace/share/kctf/security-research
 
-RUN git clone --depth=1 https://github.com/google/kernel-research.git /workspace/kctf/kernel-research
+RUN git clone --depth=1 https://github.com/google/kernel-research.git /workspace/share/kctf/kernel-research
 
 # Default shell for envsetup.sh compatibility
 SHELL ["/bin/bash", "-c"]
