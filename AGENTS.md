@@ -1,6 +1,6 @@
-# AGENTS.md — agent guide for `linux-env`
+# AGENTS.md — agent guide for `kenv`
 
-`linux-env` is a QEMU/KVM kernel dev environment with a Docker-style
+`kenv` is a QEMU/KVM kernel dev environment with a Docker-style
 **profile (image) + vm (container)** model. State lives on disk; the CLI
 (`vm.sh`, `kernel.sh`) is **strict and stateless** — profile/vm scope is
 passed via `-p`/`-v` flags on every invocation, never inherited from env.
@@ -37,7 +37,7 @@ set by `source $SCRIPTS/env.sh` once per shell — needed for the path
 references above. Do that as the first line of any Bash invocation:
 
 ```bash
-source /home/jjy/project/linux-env/scripts/env.sh
+source /home/jjy/project/kenv/scripts/env.sh
 ```
 
 ## `vm.sh ssh` exit codes
