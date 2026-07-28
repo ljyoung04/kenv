@@ -1,4 +1,4 @@
-# linux-env
+# kenv
 
 QEMU/KVM을 중심으로 구축한 간결한 Linux 커널 개발 및 디버깅 환경으로,
 Docker 스타일의 **profile + vm** 모델을 사용합니다.
@@ -37,7 +37,7 @@ Docker 스타일의 **profile + vm** 모델을 사용합니다.
 
 용어 체계는 Docker에서 그대로 가져왔습니다:
 
-| Docker            | linux-env             | 디스크상의 위치                       |
+| Docker            | kenv             | 디스크상의 위치                       |
 |-------------------|-----------------------|---------------------------------------|
 | 이미지(불변)      | **profile**           | `profiles/<p>/profile.sh`             |
 | 컨테이너          | **vm**                | `profiles/<p>/vms/<v>/`               |
@@ -66,7 +66,7 @@ profile은 작은 셸 파일이며 두 가지 방식이 있습니다:
 `~/.bashrc`에 다음 한 줄을 추가합니다:
 
 ```bash
-envlx() { source /path/to/linux-env/scripts/env.sh "$@"; }
+envlx() { source /path/to/kenv/scripts/env.sh "$@"; }
 ```
 
 `envlx`를 처음 호출하면 `scripts/env.sh`를 `source`합니다. 이 스크립트는
@@ -226,7 +226,7 @@ Restore: source $SCRIPTS/env.sh --profile lts-6.12 --vm a
 ## 디렉터리 구조 개요
 
 ```
-linux-env/
+kenv/
 ├── kernels/<name>/             # clone하거나 압축을 푼 커널 소스 트리
 ├── images/<name>/bookworm.img  # 루트 파일 시스템 이미지(mkfs / create-image.sh)
 ├── profiles/<name>/            # profile 정의
