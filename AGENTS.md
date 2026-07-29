@@ -37,7 +37,7 @@ set by `source $SCRIPTS/env.sh` once per shell — needed for the path
 references above. Do that as the first line of any Bash invocation:
 
 ```bash
-source /home/jjy/project/kenv/scripts/env.sh
+source /workspace/scripts/env.sh
 ```
 
 ## `vm.sh ssh` exit codes
