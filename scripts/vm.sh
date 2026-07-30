@@ -435,9 +435,12 @@ cmd_run() {
         printf 'export VM_LOG=%q\n'          "$LOG_FILE"
     } > "$META_FILE"
 
+    IO_URING="sysctl.kernel.io_uring_disabled=2"
+    USERNS="sysctl.user.max_user_namespaces=1"
+
     # Build QEMU args (x86_64 only for now)
     local QEMU_BIN=qemu-system-x86_64
-    local KAPPEND="console=ttyS0 root=/dev/vda earlyprintk=serial net.ifnames=0 page_poison=1 kasan_multi_shot panic=0 no_hash_pointers acpi=noirq oops=oops"
+    local KAPPEND="console=ttyS0 root=/dev/vda earlyprintk=serial net.ifnames=0 page_poison=1 kasan_multi_shot panic=0 no_hash_pointers acpi=noirq oops=oops $USERNS $IO_URING"
     if [ "$enable_kaslr" = "false" ]; then
         KAPPEND="$KAPPEND nokaslr"
     fi
