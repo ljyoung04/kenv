@@ -23,6 +23,16 @@ These rules apply to every task in `/workspace`. Detailed procedures in
 6. Keep execution inside task-owned local VMs or the official KernelCTF service.
    Uploading, submitting, reporting, or publishing requires explicit user
    instruction.
+7. Before handoff, record vulnerabilities and useful primitives found during the
+   task in `$SHARE/<research-name>/FINDINGS.md` for the next agent. State only
+   concise, objective facts: trigger conditions, affected code, observed
+   behavior, and supporting artifact paths. Do not include opinions or
+   unsupported conclusions.
+8. Never perform work that could damage, destabilize, or disrupt the host
+   system. This includes running PoCs or exploits on the host, changing the host
+   kernel, modules, sysctls, firewall, mounts, block devices, or services,
+   rebooting or shutting down the host, and exhausting host resources. Perform
+   any such work only inside a task-owned VM or the official KernelCTF service.
 
 ## Mandatory routing
 
