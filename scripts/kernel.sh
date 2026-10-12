@@ -33,6 +33,14 @@ profiles (KSRC + KOBJ).
 EOF
 }
 
+validate_profile_name() {
+    local value="$1"
+    if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        error "Profile name must contain only letters, digits, '.', '_' or '-', and start with a letter or digit: $value"
+        return 1
+    fi
+}
+
 require_profile() {
     : "${PRJ:?PRJ not set; source scripts/env.sh first}"
     if [ -z "${PROFILE:-}" ]; then
@@ -175,6 +183,7 @@ done
 : "${PRJ:?PRJ not set; source scripts/env.sh first}"
 
 if [ -n "$PROFILE_ARG" ]; then
+    validate_profile_name "$PROFILE_ARG" || exit 2
     PROFILE="$PRJ/profiles/$PROFILE_ARG"
     PROFILE_SH="$PROFILE/profile.sh"
     if [ ! -f "$PROFILE_SH" ]; then

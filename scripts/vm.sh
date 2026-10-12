@@ -30,11 +30,14 @@ VM-scope (SSH_PORT/GDB_PORT/...) is loaded from .../vms/<v>/vm.sh.
 
 Context-independent (no flags):
   ls [--json]              List registered profiles + static info
-  ps [--json]              List running VMs (PID alive in /proc)
+  ps [--json]              List running VMs (PID + matching QEMU command line)
   help                     Show this help
 
+Profile and VM names may contain letters, digits, '.', '_' and '-', and must
+start with a letter or digit.
+
 Profile required (-p):
-  run <vm_name> [opts]     Boot a new VM under -p. opts:
+  run <vm_name> [opts]     Boot a new VM under -p; refuse an existing VM dir. opts:
                              --shared   enable 9p host_share
                              --kaslr    enable KASLR (default: nokaslr)
                              --android  device-matched env (Pixel 10 6.6.82):
@@ -54,7 +57,7 @@ Profile + vm required (-p -v):
 
 State files (under $PRJ/profiles/<p>/vms/<v>/):
   vm.sh    SSH_PORT/GDB_PORT/metadata exports (sourced after -v)
-  vm.pid   QEMU PID (single source of truth for liveness)
+  vm.pid   QEMU PID (validated against the matching QEMU command line)
   boot.log serial console
 EOF
 }
@@ -68,6 +71,32 @@ is_pid_alive() {
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     [ "$pid" -gt 0 ] || return 1
     [ -d "/proc/$pid" ]
+}
+
+is_vm_qemu_process() {
+    local vdir="$1" pid="${2:-}" exe arg previous=""
+    is_pid_alive "$pid" || return 1
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    case "${exe##*/}" in
+        qemu-system-*) ;;
+        *) return 1 ;;
+    esac
+    while IFS= read -r -d '' arg; do
+        if [ "$previous" = "-pidfile" ] && [ "$arg" = "$vdir/vm.pid" ]; then
+            return 0
+        fi
+        previous="$arg"
+    done < "/proc/$pid/cmdline"
+    return 1
+}
+
+validate_scope_name() {
+    local kind="$1" value="$2"
+    if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        error "$kind must contain only letters, digits, '.', '_' or '-', and start with a letter or digit: $value"
+        return 1
+    fi
 }
 
 read_pid() {
@@ -290,7 +319,7 @@ cmd_ps() {
     for r in "${rows[@]}"; do
         IFS=$'\t' read -r pname vname vdir <<<"$r"
         pid="$(read_pid "$vdir")"
-        if is_pid_alive "$pid"; then
+        if is_vm_qemu_process "$vdir" "$pid"; then
             sp="$( vm_meta_get "$vdir/vm.sh" SSH_PORT)"
             gp="$( vm_meta_get "$vdir/vm.sh" GDB_PORT)"
             st="$( vm_meta_get "$vdir/vm.sh" VM_STARTED_AT)"
@@ -357,6 +386,7 @@ cmd_run() {
         error "usage: vm.sh run <vm_name> [--shared] [--kaslr] [--android]"
         exit 2
     fi
+    validate_scope_name "VM name" "$vm_name" || exit 2
     require_profile
 
     : "${ARCH:?ARCH not set in profile}"
@@ -386,18 +416,16 @@ cmd_run() {
     fi
     kernel_image="$(realpath "$kernel_image")"
 
-    # VM directory under current profile
+    # VM directory under current profile. Create it atomically so concurrent
+    # runs cannot reuse a name or overwrite a stopped VM's evidence.
     local vdir="$PROFILE/vms/$vm_name"
-    mkdir -p "$vdir"
-
-    # Reject if vm name is already alive in this profile.
-    local prev_pid
-    prev_pid="$(read_pid "$vdir")"
-    if is_pid_alive "$prev_pid"; then
-        error "VM '$vm_name' is already running (pid=$prev_pid). Run 'vm.sh kill' first."
+    local SESSION
+    SESSION="$(tmux_session_for_profile)"
+    if tmux has-session -t "$SESSION" 2>/dev/null && \
+       tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$vm_name"; then
+        error "Refusing to replace existing VM window '$SESSION:$vm_name'. Run 'vm.sh kill' first."
         exit 1
     fi
-
     # Allocate SSH/GDB pair
     local SSH_P GDB_P
     if ! SSH_P=$(allocate_port_pair); then
@@ -406,12 +434,18 @@ cmd_run() {
     fi
     GDB_P=$(( SSH_P - 20000 ))
 
+    mkdir -p "$PROFILE/vms"
+    if ! mkdir "$vdir" 2>/dev/null; then
+        error "Refusing to reuse existing VM directory: $vdir"
+        exit 1
+    fi
+
     local LOG_FILE="$vdir/boot.log"
     local PID_FILE="$vdir/vm.pid"
     local MON_FILE="$vdir/qemu.mon"
     local META_FILE="$vdir/vm.sh"
 
-    # Wipe stale dynamic files; truncate boot.log.
+    # Initialize dynamic files and boot.log in the newly created directory.
     rm -f "$PID_FILE" "$MON_FILE"
     : > "$LOG_FILE"
 
@@ -486,14 +520,8 @@ cmd_run() {
         error "tmux not found; cannot launch VM in background."
         exit 1
     fi
-    local SESSION
-    SESSION="$(tmux_session_for_profile)"
     if ! tmux has-session -t "$SESSION" 2>/dev/null; then
         tmux new-session -d -s "$SESSION" -n "shell" "bash"
-    fi
-    # If a stale window with this vm_name exists (from a prior dead VM), close it.
-    if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$vm_name"; then
-        tmux kill-window -t "$SESSION:$vm_name" 2>/dev/null || true
     fi
 
     local QEMU_CMD="$QEMU_BIN" a
@@ -685,11 +713,26 @@ cmd_attach() {
 
 cmd_kill() {
     require_vm
-    local pid
+    local pid i
     pid="$(read_pid "$VM")"
-    if is_pid_alive "$pid"; then
+    if is_pid_alive "$pid" && ! is_vm_qemu_process "$VM" "$pid"; then
+        error "Refusing to kill pid=$pid: it is not the QEMU process for '$VM'."
+        return 1
+    fi
+    if is_vm_qemu_process "$VM" "$pid"; then
         info "Killing VM (pid=$pid)..."
-        kill -KILL "$pid" 2>/dev/null || true
+        if ! kill -KILL "$pid" 2>/dev/null; then
+            error "Failed to kill the verified QEMU process (pid=$pid); preserving VM state."
+            return 1
+        fi
+        for i in $(seq 1 20); do
+            is_vm_qemu_process "$VM" "$pid" || break
+            sleep 0.05
+        done
+        if is_vm_qemu_process "$VM" "$pid"; then
+            error "QEMU is still alive after SIGKILL (pid=$pid); preserving VM state."
+            return 1
+        fi
     else
         info "VM PID is not alive; nothing to kill (vm.pid: ${pid:-(empty)})."
     fi
@@ -712,7 +755,19 @@ cmd_rm() {
     local pid
     pid="$(read_pid "$VM")"
     if is_pid_alive "$pid"; then
-        error "VM '$(basename "$VM")' is still running (pid=$pid). Run 'vm.sh kill' first."
+        if is_vm_qemu_process "$VM" "$pid"; then
+            error "VM '$(basename "$VM")' is still running (pid=$pid). Run 'vm.sh kill' first."
+        else
+            error "Refusing to remove VM: vm.pid names a live non-matching process (pid=$pid)."
+        fi
+        exit 1
+    fi
+    local SESSION vname
+    SESSION="$(tmux_session_for_profile)"
+    vname="$(basename "$VM")"
+    if tmux has-session -t "$SESSION" 2>/dev/null && \
+       tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$vname"; then
+        error "VM window '$SESSION:$vname' still exists. Run 'vm.sh kill' first."
         exit 1
     fi
     case "$VM" in
@@ -761,6 +816,7 @@ require_prj
 
 # Resolve -p → PROFILE / PROFILE_SH + load profile.sh
 if [ -n "$PROFILE_ARG" ]; then
+    validate_scope_name "Profile name" "$PROFILE_ARG" || exit 2
     PROFILE="$PRJ/profiles/$PROFILE_ARG"
     PROFILE_SH="$PROFILE/profile.sh"
     if [ ! -d "$PROFILE" ]; then
@@ -781,6 +837,7 @@ if [ -n "$VM_ARG" ]; then
     if [ -z "$PROFILE_ARG" ]; then
         error "-v requires -p"; exit 2
     fi
+    validate_scope_name "VM name" "$VM_ARG" || exit 2
     VM="$PROFILE/vms/$VM_ARG"
     VM_SH="$VM/vm.sh"
     if [ ! -d "$VM" ]; then

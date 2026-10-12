@@ -13,9 +13,7 @@
 
 # share: keep dir, ignore everything inside
 /share/*
-!/share/kctf/
-/share/kctf/*
-!/share/kctf/.gitkeep
+!/share/.gitkeep
 
 # androids workspace: keep dir skeleton only
 /androids/*
