@@ -1,300 +1,236 @@
 # kenv
 
-QEMU/KVM을 중심으로 구축한 간결한 Linux 커널 개발 및 디버깅 환경으로,
-Docker 스타일의 **profile + vm** 모델을 사용합니다.
+QEMU/KVM 기반 Linux 커널 개발·디버깅 환경입니다. **profile**은 커널과
+파일 시스템 설정이고, **VM**은 해당 profile로 부팅한 개별 게스트입니다.
 
-> *profile*을 한 번 정의한 뒤(사용할 커널, 루트 파일 시스템, 아키텍처)
-> 그 위에 이름이 있는 *VM*을 띄워 부팅, SSH, gdb, 퍼징, 익스플로잇 작업
-> 등에 사용합니다. 이제 모든 셸에서 `SRC=…`, `OBJ=…`, `SSH_PORT=…`를
-> 일일이 들고 다닐 필요가 없습니다.
+실제 스크립트 경로는 `tools/`입니다. 모든 CLI는 자신의 위치로 프로젝트
+경로를 계산하므로, 실행 디렉터리나 이전 셸의 환경 변수에 의존하지 않습니다.
 
----
+## 두 가지 사용 방식
 
-## 필요한 이유
+사용자는 선택한 profile/VM을 기억하는 셸 함수를 사용할 수 있습니다:
 
-다음 작업을 자주 한다면:
+```bash
+source tools/env.sh
+envlx --profile lts-6.12
+kernel --build -j 16
+vm run a
+envlx --vm a
+vm ssh -- uname -r
+```
 
-- 여러 Linux 커널 버전을 나란히 빌드하고,
-- KVM 가속을 사용해 QEMU에서 원하는 커널을 부팅하고,
-- 실행 중인 게스트에 SSH/scp/gdb로 접속하고,
-- 여러 게스트를 동시에 실행해 두는 경우,
+에이전트와 자동화는 대상이 명시된 CLI를 직접 호출합니다. `env.sh`를
+source할 필요가 없으며, 다른 디렉터리에서는 절대 경로를 사용합니다:
 
-…이 저장소는 흔히 사용하는 임시방편의 셸 스크립트를 작고 예측 가능한
-인터페이스로 대체합니다:
+```bash
+/workspace/tools/vm.sh ls --json
+/workspace/tools/vm.sh ps --json
+/workspace/tools/kernel.sh -p lts-6.12 --build -j 16
+/workspace/tools/vm.sh -p lts-6.12 run research_$(date +%s)
+/workspace/tools/vm.sh -p lts-6.12 -v <vm_name> ssh -- uname -r
+/workspace/tools/vm.sh -p lts-6.12 -v <vm_name> scp ./test.c vm:/root/test.c
+```
 
-| 원하는 작업                 | 실행할 명령                                      |
-|-----------------------------|--------------------------------------------------|
-| 커널/파일 시스템 조합 정의 | `profiles/<name>/profile.sh` 편집(템플릿 자동 생성) |
-| 해당 조합 환경 진입         | `source scripts/env.sh --profile <name>`         |
-| 해당 환경에서 새 VM 부팅    | `scripts/vm.sh run <vm_name>`                    |
-| 실행 중인 VM 접속           | `scripts/vm.sh ssh`                              |
-| 커널 빌드                   | `scripts/kernel.sh --build`                      |
-| 실행 중인 모든 항목 확인    | `scripts/vm.sh ps`                               |
-
----
-
-## 개념
-
-용어 체계는 Docker에서 그대로 가져왔습니다:
-
-| Docker            | kenv             | 디스크상의 위치                       |
-|-------------------|-----------------------|---------------------------------------|
-| 이미지(불변)      | **profile**           | `profiles/<p>/profile.sh`             |
-| 컨테이너          | **vm**                | `profiles/<p>/vms/<v>/`               |
-| `docker images`   | `vm.sh ls`            | —                                     |
-| `docker ps`       | `vm.sh ps`            | —                                     |
-| `docker run`      | `vm.sh run <vm_name>` | —                                     |
-
-profile은 작은 셸 파일이며 두 가지 방식이 있습니다:
-
-- **유형 A — 소스에서 빌드.** `KSRC`(커널 트리)와
-  `KOBJ`(빌드 디렉터리)를 설정합니다. `scripts/kernel.sh --build`가
-  bzImage를 생성합니다.
-- **유형 B — 미리 빌드된 bzImage.** `KIMAGE`를 직접 설정합니다.
-  CTF/릴리스 이미지에 유용합니다. `KSRC`는 선택 사항입니다
-  (gdb 소스 매핑에만 사용).
-
-두 유형 모두 `ARCH`, `LLVM`, `FS`(루트 파일 시스템 이미지 디렉터리)가
-필요합니다.
-
----
+`vm.sh`와 `kernel.sh`는 상속된 profile/VM 설정을 초기화하고 명시된
+`-p`/`-v`로 설정을 읽습니다. `-p`, `-v`는 하위 명령 앞에 둡니다.
+SSH 원격 명령 앞에는 `--`가 필요합니다. `scp`는 로컬 경로와 `vm:/경로`
+한 쌍을 받습니다. `:`이나 `-`로 혼동될 수 있는 로컬 이름에는 `./`를 붙입니다.
 
 ## 빠른 시작
 
-### 1. 모든 셸에서 도우미 사용하기(선택 사항이지만 권장)
+### 1. 셸 도우미 등록하기 (선택)
 
-`~/.bashrc`에 다음 한 줄을 추가합니다:
-
-```bash
-envlx() { source /path/to/kenv/scripts/env.sh "$@"; }
-```
-
-`envlx`를 처음 호출하면 `scripts/env.sh`를 `source`합니다. 이 스크립트는
-프로젝트 전역 변수(`$PRJ`, `$SCRIPTS`, `$CONFIGS`, `$IMAGES`, `$SHARE`,
-`$SYZKALLER`)를 내보내고, `vm`/`lsfs`/`setfs`/`mkfs`/`vmhttp` 도우미를
-정의하며, 위의 임시 함수를 실제 `envlx`로 덮어씁니다. 그다음부터는
-모든 셸에서 `envlx`와 `vm`을 사용할 수 있습니다.
-
-셸 도우미를 원하지 않는다면 필요할 때 `source scripts/env.sh`를 직접
-실행하면 됩니다. 아래의 모든 예시는 어느 방식으로든 작동합니다.
-
-### 2. 첫 profile 정의하기
+`~/.bashrc` 또는 `~/.zshrc`에 다음 함수를 넣습니다. 제공되는 Docker의
+Bash 설정에는 `/workspace/tools/env.sh` 경로로 등록되어 있습니다.
 
 ```bash
-envlx --profile lts-6.12
-# → "Profile 'lts-6.12' does not exist."
-# → "Creating template at: .../profiles/lts-6.12/profile.sh"
-# → "Edit it, then run: source $SCRIPTS/env.sh --profile lts-6.12"
-$EDITOR $PRJ/profiles/lts-6.12/profile.sh
+envlx() { source /path/to/kenv/tools/env.sh "$@"; }
 ```
 
-유형 A 예시(소스에서 빌드):
+`envlx`를 처음 실행하면 `vm`, `kernel`, `connect`, `lsfs`, `setfs`, `mkfs`, `vmhttp`
+함수도 정의됩니다. `env.sh`는 대화형 편의 계층이며 CLI 실행의 전제 조건이
+아닙니다. `PRJ`, `SCRIPTS`, `CONFIGS`, `IMAGES`, `SHARE`, `SYZKALLER`는
+항상 현재 저장소 경로로 설정됩니다. 기존 이름인 `SCRIPTS`는 `tools/`를 가리킵니다.
 
-```sh
+### 2. profile 정의하기
+
+```bash
+envlx --profile lts-6.12          # 없으면 템플릿 생성 후 종료
+$EDITOR "$PRJ/profiles/lts-6.12/profile.sh"
+```
+
+소스에서 빌드하는 profile:
+
+```bash
 export ARCH=x86_64
-export LLVM=1
+export LLVM=19
 export FS="$IMAGES/x64"
 export KSRC="$PRJ/kernels/linux-6.12.y"
 export KOBJ="$KSRC/build/debug"
 ```
 
-유형 B 예시(릴리스 bzImage 사용):
+미리 빌드된 이미지로 부팅하는 profile:
 
-```sh
+```bash
 export ARCH=x86_64
-export LLVM=1
+export LLVM=19
 export FS="$IMAGES/x64"
-export KIMAGE="$PRJ/kctf/releases/lts-6.12.79/bzImage"
+export KIMAGE="$PRJ/releases/example/bzImage"
+# 선택: GDB 소스 매핑에 사용할 KSRC
 ```
 
-### 3. 커널 빌드하기(유형 A)
+profile은 신뢰하는 사용자가 작성한 셸 설정 파일입니다. source되므로 임의의
+외부 파일을 profile로 사용하지 않습니다. CLI만 사용할 때는
+`profiles/<name>/profile.sh`를 직접 생성해도 됩니다.
+
+선택 설정은 `CROSS_COMPILE`, `SMP`, `MEM`, `EXTRA_CMDLINE`입니다.
+profile 전환이나 CLI 호출 때 이전 값이 남지 않도록 초기화합니다.
+현재 VM 실행기는 x86_64 QEMU/KVM을 사용합니다. arm64 커널 빌드나 이미지
+생성이 가능하더라도 arm64 VM 부팅을 지원한다는 뜻은 아닙니다.
+
+### 3. 커널 빌드하기
 
 ```bash
 envlx --profile lts-6.12
-kernel.sh --olddefconfig
-kernel.sh --build               # 기본값은 -j 16, -j N으로 변경 가능
-kernel.sh --clang               # 선택 사항: compile_commands.json + .clangd
+kernel --kctfconfig              # configs/kernelctf.config를 KOBJ/.config로 복사
+kernel --olddefconfig
+kernel --build -j 16
+kernel --clang                  # compile_commands.json, .clangd
 ```
 
-kernelctf의 기본 config에서 시작하려면:
+`kernel --menuconfig`도 지원합니다. `kernel -p other --build`처럼 한 번만
+다른 profile을 지정할 수 있으며 현재 셸의 선택은 바뀌지 않습니다.
+
+### 4. VM 실행·접속·종료하기
 
 ```bash
-kernel.sh --kctfconfig          # cp $CONFIGS/kernelctf.config $KOBJ/.config
-kernel.sh --olddefconfig
-kernel.sh --build
+vm run a
+envlx --vm a
+vm ssh
+vm ssh -- uname -r
+vm scp ./test.c vm:/root/test.c
+vm scp vm:/root/result.txt ./result.txt
+vm gdb
+vm log
+vm attach
+vm ps
+vm kill                         # QEMU 종료, 로그·메타데이터 보존, 셸 VM 선택 해제
+vm rm a                         # 중지된 VM 디렉터리 삭제; 이름을 명시해야 함
 ```
 
-### 4. VM을 부팅하고 접속하기
+VM 이름이 이미 존재하면 `run`은 덮어쓰지 않고 실패합니다. 새 이름을 쓰거나
+필요한 산출물을 보존한 뒤 명시적으로 `rm`합니다. `kill`과 `rm`은 PID가
+해당 VM의 QEMU인지 검사하며, PID가 다른 살아 있는 프로세스를 가리키면 거부합니다.
+
+`vm -p other -v b ssh -- uname -r`는 한 번만 다른 VM에 접속합니다.
+다른 profile을 `-p`로 지정할 때 현재 profile의 VM 이름을 자동 재사용하지
+않으므로, VM 작업에는 `-v`도 지정해야 합니다.
+
+`run` 옵션은 `--kaslr`, `--shared`(9p 공유), `--android`입니다.
+취약점 연구 파일은 `vm scp`로 옮깁니다. `vmhttp`는 선택한 로컬 디렉터리를
+HTTP로 제공하는 별도 편의 함수입니다.
+
+SSH 종료 코드는 원격 명령의 코드를 유지합니다. SSH가 255로 실패하면
+`boot.log`를 확인하여 251(접속 불가) 또는 252(panic/oops 흔적)를 반환합니다.
+원격 명령도 251/252를 반환할 수 있으므로 진단 메시지와 함께 해석합니다.
+
+### 5. 파일 시스템 이미지 관리하기
 
 ```bash
-vm run a                        # 'a'라는 이름의 VM 부팅
-                                # 출력 마지막 줄: "Run: envlx --vm a"
-envlx --vm a                    # SSH_PORT, GDB_PORT를 현재 셸에 불러오기
-vm ssh                          # 게스트에 대화형 SSH로 접속
-vm ssh uname -a                 # 일회성 원격 명령
-vm log                          # $VM/boot.log를 실시간으로 출력
+./tools/fs.sh ls
+./tools/fs.sh create x64 -a x86_64 -s 5120
+# 셸 도우미로 같은 기능 호출:
+lsfs
+mkfs newimg -a x86_64 -s 5120
 ```
 
-### 5. 두 번째 VM을 동시에 실행하기
+생성에는 sudo와 debootstrap이 필요하며 디스크 이미지 마운트를 수행합니다.
+기존 이미지 디렉터리는 재사용하지 않습니다. 실패하면 부분 산출물을 보존합니다.
+기본 배포판은 bookworm이며, VM은 `bookworm.img`와 `bookworm.id_rsa`를 사용합니다.
+다른 배포판은 `-d`로 생성할 수 있지만 현재 VM 실행기의 대상은 아닙니다.
+
+`setfs <name>`과 `mkfs`의 자동 선택은 현재 셸의 `FS`만 변경합니다.
+`mkfs`의 기본 아키텍처는 현재 profile의 `ARCH`이며 `-a`로 바꿀 수 있습니다.
+VM에서 사용할 이미지를 변경하려면 **profile.sh의 FS를 수정**해야 합니다.
+이미 실행 중인 VM은 부팅 당시 기록한 이미지·소스 경로로 접속합니다.
+
+## 스크립트 구성
+
+`connect`는 `tools/server_cert.pem`으로 TLS 서버에 접속합니다 (`socat` 필요).
+제공되는 Bash 설정에서는 바로 사용할 수 있고, 다른 셸에서는
+`source tools/env.sh`로 등록합니다. profile/VM 선택은 필요하지 않습니다.
 
 ```bash
-vm run b                        # 서로 다른 SSH/GDB 포트 쌍을 자동 할당
-vm ps                           # 'a'와 'b' 모두 표시
-envlx --vm b                    # 셸 컨텍스트를 'b'로 전환
-vm ssh hostname
+connect                         # 기본 KernelCTF 서버
+connect hostname:port           # 접속 대상 지정
 ```
 
-### 6. 종료 및 삭제하기
+| 파일 | 역할 |
+|---|---|
+| `tools/.common.sh` | 전역 경로 초기화, 진단, 이름 검증, profile/VM 로딩·초기화 |
+| `tools/env.sh` | 선택 사항인 Bash/zsh 컨텍스트와 사용자용 단축 함수 |
+| `tools/vm.sh` | VM 목록·실행·SSH·SCP·GDB·종료·삭제 |
+| `tools/kernel.sh` | 커널 config·빌드·clang 도구 설정 |
+| `tools/connect.sh` | 동봉된 인증서를 사용하는 TLS 접속 (`connect`) |
+| `tools/fs.sh` | 이미지 목록·생성 CLI |
+| `tools/create-image.sh` | Debian 이미지 생성 백엔드; 빈 작업 디렉터리에서 직접 사용 가능 |
+| `tools/extract-vmlinux.sh` | 커널 이미지에서 vmlinux 추출 |
+| `tools/repo-apply.py` | AOSP `repo diff` 적용·dry run |
+| `tools/tracer.sh` | 게스트에서 source하는 ftrace 도우미 |
+| `tools/gdb/race_debug.gdb` | GDB 디버깅 명령 모음 |
 
-```bash
-vm kill                         # QEMU 중지, 나중 분석을 위해 $VM/boot.log 유지
-vm rm                           # $VM 디렉터리를 완전히 삭제
-                                # (VM이 아직 실행 중이면 거부)
-```
+중복된 `envsetup.sh`, `run-vm.sh`, `ssh.sh`, `scp.sh`는 제거했습니다.
 
----
+| 이전 호출 | 대체 호출 |
+|---|---|
+| `source scripts/env.sh` | `source tools/env.sh` (대화형 셸에서만 필요) |
+| `source .../envsetup.sh` | `source tools/env.sh --profile <p>` |
+| `run-vm.sh` | `tools/vm.sh -p <p> run <v>` |
+| `ssh.sh ...` | `tools/vm.sh -p <p> -v <v> ssh -- ...` |
+| `scp.sh ...` | `tools/vm.sh -p <p> -v <v> scp ./file vm:/path` |
 
-## 참조
+자동화 지침에도 “매 Bash 호출마다 env.sh를 source”하는 규칙이 필요하지 않습니다.
+명시적 CLI와 `-p`/`-v`를 사용하면 됩니다.
 
-### 스크립트
+## 상태와 디렉터리
 
-| 스크립트 | 용도 |
-|----------|------|
-| `scripts/env.sh`     | `source` 전용 진입점. `--profile`/`--vm`/`--reset`을 처리하고 전역 변수를 설정하며 도우미를 정의합니다. |
-| `scripts/vm.sh`      | VM 수명 주기: `ls`/`ps`/`run`/`ssh`/`scp`/`gdb`/`attach`/`kill`/`rm`/`log`. |
-| `scripts/kernel.sh`  | 커널 빌드/config: `--menuconfig`/`--olddefconfig`/`--kctfconfig`/`--build [-j N]`/`--clang`. |
-| `scripts/envsetup.sh`, `scripts/run-vm.sh` | 참조용으로 유지하는 레거시 진입점. 새 코드는 이 파일들을 호출하지 않습니다. |
-
-### 파일 시스템 이미지
-
-```bash
-lsfs                            # $IMAGES 아래에서 사용 가능한 이미지 목록
-setfs <name>                    # 현재 셸의 $FS를 $IMAGES/<name>으로 설정
-mkfs <name> [-a arch] [-s MB]   # 새 이미지 생성(debootstrap 기반)
-```
-
-`$FS`는 일반적으로 profile의 일부로 `profile.sh`에 정의하지만, `setfs`는
-일회성 실험에 유용합니다.
-
-### tmux 연동
-
-각 VM은 백그라운드의 tmux 세션/창 안에서 실행됩니다:
-
-- 세션 이름: `vms_<profile_name>`(profile 이름의 `.`과 `:`은 `_`로
-  바뀝니다. tmux가 이 문자를 대상 구분자로 사용하기 때문입니다)
-- 창 이름: `<vm_name>`
-
-```bash
-vm attach                       # tmux attach -t vms_<p>:<vm_name>
-```
-
-### VM별 상태 파일
-
-`$PROFILE/vms/<vm_name>/` 아래:
-
-| 파일 | 내용 |
-|------|------|
-| `vm.sh`    | `source` 가능: `SSH_PORT`, `GDB_PORT`, `VM_KERNEL_IMAGE`, `VM_FS`, … |
-| `vm.pid`   | QEMU PID — 실행 여부를 판단하는 유일한 기준 |
-| `boot.log` | 직렬 콘솔 출력 |
-| `qemu.mon` | QEMU 모니터 Unix 소켓 |
-
-`vm.sh ps`는 `vm.pid`를 읽고 `/proc/$PID`를 확인해 실행 여부를 판단합니다.
-종료된 디렉터리는 자동으로 정리하지 않으므로 충돌을 사후 분석할 수 있습니다.
-명시적으로 정리하려면 `vm.sh rm`을 사용합니다.
-
-### JSON 출력
-
-스크립트/에이전트용:
-
-```bash
-vm ls --json
-vm ps --json
-```
-
-### 다른 셸에서 컨텍스트 복원하기
-
-인자 없이 `envlx`를 실행하면 현재 범위를 출력하고, 다른 터미널에 복사해
-붙여넣을 수 있는 `Restore:` 줄로 끝납니다:
-
-```
-Restore: source $SCRIPTS/env.sh --profile lts-6.12 --vm a
-```
-
----
-
-## 디렉터리 구조 개요
-
-```
+```text
 kenv/
-├── kernels/<name>/             # clone하거나 압축을 푼 커널 소스 트리
-├── images/<name>/bookworm.img  # 루트 파일 시스템 이미지(mkfs / create-image.sh)
-├── profiles/<name>/            # profile 정의
-│   ├── profile.sh              # 정적 config(env.sh에서 source)
-│   └── vms/<vm_name>/          # VM별 동적 상태(vm.sh, vm.pid, boot.log)
-├── configs/                    # 커널 config, .clangd 템플릿
-├── share/                      # 호스트↔게스트 9p 공유 디렉터리
-├── syzkaller/                  # syzkaller 작업 공간
-├── scripts/
-│   ├── env.sh, vm.sh, kernel.sh    # 주요 진입점
-│   ├── envsetup.sh, run-vm.sh      # 레거시(참조 전용)
-│   ├── ssh.sh, scp.sh              # vm.sh가 사용하는 내부 도우미
-│   ├── shell-init.sh               # 선택 사항인 bashrc 임시 함수
-│   └── create-image.sh, .common.sh
-├── commands.txt                # 주석이 달린 작업 흐름 예시
-├── README.md                   # 이 파일
-└── CLAUDE.md                   # 에이전트용 운영 가이드
+├── tools/                     # CLI와 셸 도우미
+├── kernels/<name>/            # 커널 소스
+├── images/<name>/             # bookworm.img, bookworm.id_rsa
+├── profiles/<name>/profile.sh # 정적 설정
+│   └── vms/<vm>/              # vm.sh, vm.pid, boot.log, qemu.mon
+├── configs/                   # 커널 config와 .clangd
+├── share/                     # 연구 산출물과 전송할 파일
+├── tests/test_cli.py          # 격리된 CLI 회귀 테스트
+└── commands.txt              # 호출 예시
 ```
 
----
+VM은 `vms_<profile>` tmux 세션의 `<vm>` 창에서 실행됩니다. profile 이름의
+`.`은 tmux 세션 이름에서 `_`로 바뀝니다. VM 생존 여부는 PID와 해당 QEMU의
+명령행을 함께 검사합니다. `vm.sh ls --json`, `vm.sh ps --json`은 JSON을 출력합니다.
 
-## Docker(선택 사항)
+인자 없는 `envlx`는 디스크의 설정을 다시 읽고 현재 컨텍스트와 다른 셸에
+복사할 수 있는 복원 명령을 출력합니다. `envlx --reset`은 선택을 해제합니다.
 
-호스트에 LLVM-19/QEMU/debootstrap을 설치하고 싶지 않다면, 이 저장소에서
-모든 도구가 미리 설치된 개발 컨테이너를 제공합니다.
+## 검증
 
 ```bash
-./init.sh                       # .env 생성(UID/GID 감지, SSH 포트)
+python3 -m unittest discover -s tests -v
+```
+
+테스트는 임시 저장소와 대체 명령을 사용합니다. 실제 VM, SSH 접속, 커널 빌드,
+sudo, 이미지 마운트는 실행하지 않습니다.
+
+## Docker (선택)
+
+```bash
+./init.sh
 docker compose up -d
 docker compose exec -u kenv-$(whoami) kenv bash
 ```
 
-컨테이너 안에서도 위의 profile/vm 작업 흐름은 동일합니다. 프로젝트
-디렉터리는 `/workspace`에 바인드 마운트됩니다.
-
-컨테이너에 미리 설치된 도구:
-
-- LLVM/Clang-19, GDB 17.1([bata24/gef][gef] 포함), tmux, jq
-- fzf, ripgrep, fd, bat, eza, tree, zoxide
-- htop, strace, ltrace, nano, openssh-server
-
-[gef]: https://github.com/bata24/gef
-
-### SSH 연결 경로
-
-```
-로컬 머신  ─ssh→  서버  ─docker exec→  컨테이너  ─vm.sh ssh→  QEMU 게스트
-```
-
-컨테이너 SSH 포트(호스트 → 컨테이너)는 `.env`의 `SSH_PORT`로 설정할 수
-있습니다(기본값 2222, `init.sh`가 자동 선택).
-
----
-
-## 참고 사항
-
-- `scripts/envsetup.sh`와 `scripts/run-vm.sh`는 레거시 "단일 전역 VM"
-  작업 흐름의 참조용으로 유지됩니다. 필요하면 여전히 독립적으로 작동하지만,
-  새 작업 흐름에서는 호출하지 않습니다. 향후 삭제할 예정입니다.
-- 저장소 루트의 `prompt_init`, `prompt_output`, `prompt_final`에는 현재의
-  profile/vm 모델을 만들게 된 설계 근거가 기록되어 있습니다. 작업 흐름
-  문서는 아니므로 *왜* 이렇게 설계했는지 궁금할 때만 읽으세요.
-- `commands.txt`는 에이전트용 실전 예제 치트 시트입니다.
-
----
-
-## 감사의 말
-
-QEMU/KVM, debootstrap, LLVM/Clang, tmux, gdb(+ bata24/gef) 등 표준 도구를
-기반으로 만들었습니다. profile/vm CLI 형태는 Docker를 느슨하게 본떠
-설계했습니다.
+프로젝트는 `/workspace`에 마운트됩니다. 컨테이너 SSH 포트는 `.env`의
+`SSH_PORT`로 설정합니다. 컨테이너에는 LLVM/Clang-19, QEMU, debootstrap,
+GDB([bata24/gef](https://github.com/bata24/gef)), tmux, jq와 개발 도구가 포함됩니다.

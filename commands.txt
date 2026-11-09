@@ -1,111 +1,47 @@
-# linux-env: profile + vm 흐름
-#
-# 핵심: vm.sh / kernel.sh 는 strict CLI — 매 호출마다 -p (그리고 vm 대상이면 -v)
-# 를 명시해야 함. 사람용 단축은 env.sh source 후의 `vm`/`kernel` 셸 함수가 담당:
-# 현재 $PROFILE/$VM 을 자동으로 -p/-v 로 변환해서 호출함.
-#
-# - envsetup.sh / run-vm.sh 는 레퍼런스로만 남음. 새 흐름은 호출 안 함.
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 0. 셸 진입
-# ─────────────────────────────────────────────────────────────────────────────
-source scripts/env.sh
-# → PRJ/SCRIPTS/CONFIGS/IMAGES/SHARE/SYZKALLER 글로벌 export
-# → envlx, vm, kernel, lsfs/setfs/mkfs, vmhttp 셸 함수 정의
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. profile 정의 (한 번)
-# ─────────────────────────────────────────────────────────────────────────────
-# 신규 이름으로 --profile 하면 빈 template 이 자동 생성되어 안내 후 정상 종료.
-envlx --profile lts-6.12.82       # 없으면 template 생성 후 종료
-$EDITOR $PRJ/profiles/lts-6.12.82/profile.sh
-# 예 (Variant A — 소스 빌드형):
-#   export ARCH=x86_64
-#   export LLVM=1
-#   export FS="$IMAGES/x64"
-#   export KSRC="$PRJ/kernels/linux-6.12.82"
-#   export KOBJ="$KSRC/build/debug"
-# 예 (Variant B — 미리 빌드된 bzImage):
-#   export ARCH=x86_64
-#   export LLVM=1
-#   export FS="$IMAGES/x64"
-#   export KIMAGE="$PRJ/kctf/releases/lts-6.12.79/bzImage"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. profile 진입 + 커널 빌드 (Variant A)
-# ─────────────────────────────────────────────────────────────────────────────
-envlx --profile lts-6.12.82
-kernel --olddefconfig                  # 셸 함수: 자동으로 -p $PROFILE
-kernel --build                         # 기본 -j 16
-kernel --clang                         # compile_commands.json + .clangd
-
-# kernelctf base config 으로 시작:
+# kenv: 사용자 셸 도우미
+source tools/env.sh
+envlx --profile lts-6.12              # 없으면 템플릿 생성
+$EDITOR "$PRJ/profiles/lts-6.12/profile.sh"
+envlx --profile lts-6.12
 kernel --kctfconfig
 kernel --olddefconfig
-kernel --build
+kernel --build -j 16
+kernel --clang
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. VM 부팅 + 진입
-# ─────────────────────────────────────────────────────────────────────────────
-vm run my-vm_$(date +%s)               # <task>_<ts> 컨벤션
-envlx --vm <vm_name>                   # vm run 출력의 마지막 줄을 그대로 복사
+vm run a
+envlx --vm a
+vm ssh -- uname -r
+vm scp ./test.c vm:/root/test.c
+vm scp vm:/root/result.txt ./result.txt
+vm gdb
+vm attach
+vm log
+vm ps
+vm kill                              # 로그 보존; 현재 VM 선택은 해제됨
+vm rm a                              # 산출물 보존 후 명시적으로 삭제
+# 같은 이름으로 다시 실행하려면 기존 디렉터리를 먼저 삭제해야 함.
 
-vm ssh                                 # 인터랙티브 SSH
-vm ssh -- uname -r                     # 원격 1회 실행 (-- 다음은 그대로 원격)
-vm log                                 # tail -f $VM/boot.log
-vm attach                              # tmux 윈도우 attach
+# 한 번만 다른 대상 사용 (현재 셸 선택은 유지)
+kernel -p other --build -j 8
+vm -p other -v b ssh -- uname -r
 
-# 또 다른 vm 동시 운용:
-vm run other_$(date +%s)
-envlx --vm other_...                   # 같은 profile 안의 다른 vm 으로 전환
-vm ps                                  # 전역 (모든 profile 의 살아있는 vm)
+# 이미지 관리 (독립 CLI 또는 셸 도우미)
+./tools/fs.sh ls
+./tools/fs.sh create newimg -a x86_64 -s 5120
+lsfs
+mkfs another -a x86_64 -s 5120
+# setfs는 셸의 FS만 변경함. VM 이미지 변경은 profile.sh에서 수행.
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. profile 전환
-# ─────────────────────────────────────────────────────────────────────────────
-envlx --profile kctf-6.12.79           # KSRC/KOBJ/FS/... 전부 unset 후 새 set
-vm run x_$(date +%s); envlx --vm x_...
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. kill / rm 차이
-# ─────────────────────────────────────────────────────────────────────────────
-vm kill                                # QEMU 종료, 디렉토리 / boot.log 보존
-ls $VM                                 # boot.log, vm.sh, vm.pid 잔존 → 사후 분석
-vm rm <vm_name>                        # 통째 삭제 (이름 필수, 살아있는 PID 면 거부)
-# `vm rm` (셸 함수) 은 <vm_name> 이 현재 $VM 이면 성공 후 vm 스코프 env 도 unset.
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. 같은 이름 재사용 (boot.log 덮어쓰기)
-# ─────────────────────────────────────────────────────────────────────────────
-vm run foo_123
-vm kill
-vm run foo_123                         # 같은 디렉토리 재사용, vm.sh/boot.log/vm.pid 덮어쓰기
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. 파일시스템 이미지
-# ─────────────────────────────────────────────────────────────────────────────
-lsfs                                   # $IMAGES 아래 이미지 목록
-setfs x64                              # $FS 를 $IMAGES/x64 로 (셸 1회용)
-mkfs newimg -a arm64 -s 10240          # 새 이미지
-
-# 처음부터 만들고 싶을 때 (옛 방식):
-# ../../scripts/create-image.sh -d bookworm -s 20480 -a arm64
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. agent / 스크립트가 직접 호출하는 형태 (flag-explicit; env 무시)
-# ─────────────────────────────────────────────────────────────────────────────
-# 사람 쪽 `vm`/`kernel` 셸 함수 대신, 모든 컨텍스트를 한 줄에 담은 절대형.
-$SCRIPTS/vm.sh ls --json                                       # context-free
-$SCRIPTS/vm.sh ps --json                                       # context-free
-$SCRIPTS/vm.sh -p <p> run <task>_$(date +%s) [--shared] [--kaslr]
-$SCRIPTS/vm.sh -p <p> -v <v> ssh -- <cmd...>
-$SCRIPTS/vm.sh -p <p> -v <v> log
-$SCRIPTS/vm.sh -p <p> -v <v> kill
-$SCRIPTS/vm.sh -p <p> -v <v> rm
-$SCRIPTS/kernel.sh -p <p> --build [-j N]
-
-# vm ssh 의 exit code:
-#   0   = 정상 + 명령 성공
-#   1-254 = 원격 명령의 non-zero
-#   251 = unreachable (booting / sshd down / network / hang / kdb / …)
-#   252 = panic (boot.log 에 Kernel panic / Oops / BUG / GPF)
+# 에이전트/자동화: source 없이 직접 호출. 아래 <...>는 실제 이름으로 치환.
+/workspace/tools/vm.sh ls --json
+/workspace/tools/vm.sh ps --json
+/workspace/tools/kernel.sh -p <p> --build -j 16
+/workspace/tools/vm.sh -p <p> run <task>_$(date +%s)
+/workspace/tools/vm.sh -p <p> -v <v> ssh -- uname -r
+/workspace/tools/vm.sh -p <p> -v <v> scp ./test.c vm:/root/test.c
+/workspace/tools/vm.sh -p <p> -v <v> log
+/workspace/tools/vm.sh -p <p> -v <v> kill
+/workspace/tools/vm.sh -p <p> -v <v> rm
+# 에이전트 VM 이름: <task>_<unix-timestamp>, 충돌 시 새 타임스탬프 사용.
+# SSH 실패 진단: 251=접속 불가, 252=boot.log에 panic/oops 흔적.
+# 원격 명령 자체도 같은 코드를 반환할 수 있으므로 진단 메시지를 함께 확인.

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # linux-env: vm management. Stateless CLI - profile/vm scope is always passed
 # explicitly via -p/-v flags. Inherited env from the parent shell is ignored;
-# `vm.sh` always starts with a clean profile/vm scope (PRJ stays since it's
-# the project root).
+# Project paths are initialized from the script location; no env.sh needed.
 #
 # Humans typically don't call vm.sh directly; the `vm` shell function in
 # env.sh auto-injects -p/-v from $PROFILE/$VM. Agents (and scripts) pass
@@ -14,11 +13,9 @@ SCRIPT_DIR="$(realpath "$(dirname "${BASH_SOURCE[0]}")")"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.common.sh"
 
-# Start with a clean profile/vm scope. Subsequent -p/-v parsing fills them.
-# Keep PRJ from the environment (the project root must be set by env.sh).
-unset PROFILE PROFILE_SH ARCH LLVM FS KSRC KOBJ KIMAGE
-unset VM VM_SH SSH_PORT GDB_PORT
-unset VM_STARTED_AT VM_KERNEL_IMAGE VM_VMLINUX VM_KSRC VM_KOBJ VM_FS VM_LOG
+# Never inherit a previous shell's target or profile settings.
+clear_vm_scope
+clear_profile_scope
 
 usage() {
     cat <<'EOF'
@@ -91,14 +88,6 @@ is_vm_qemu_process() {
     return 1
 }
 
-validate_scope_name() {
-    local kind="$1" value="$2"
-    if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-        error "$kind must contain only letters, digits, '.', '_' or '-', and start with a letter or digit: $value"
-        return 1
-    fi
-}
-
 read_pid() {
     local vdir="$1"
     if [ -f "$vdir/vm.pid" ]; then
@@ -128,12 +117,7 @@ vm_meta_get() {
         | sed -E "s/^export[[:space:]]+${key}=//; s/^['\"]//; s/['\"]$//"
 }
 
-require_prj() {
-    : "${PRJ:?PRJ not set; source scripts/env.sh first}"
-}
-
 require_profile() {
-    require_prj
     if [ -z "${PROFILE:-}" ]; then
         error "this subcommand requires -p <profile>"
         exit 2
@@ -183,7 +167,6 @@ allocate_port_pair() {
 
 # Iterate over (profile_name, profile_dir) tab-separated lines.
 each_profile() {
-    require_prj
     shopt -s nullglob
     local pdir name psh
     for pdir in "$PRJ"/profiles/*/; do
@@ -197,7 +180,6 @@ each_profile() {
 
 # Iterate over (profile_name, vm_name, vm_dir) tab-separated lines.
 each_vm() {
-    require_prj
     shopt -s nullglob
     local pdir vdir pname vname
     for pdir in "$PRJ"/profiles/*/; do
@@ -237,7 +219,6 @@ cmd_ls() {
     local json_mode=false
     [ "${1:-}" = "--json" ] && json_mode=true
 
-    require_prj
     local rows=()
     while IFS= read -r line; do
         rows+=("$line")
@@ -308,7 +289,6 @@ cmd_ps() {
     local json_mode=false
     [ "${1:-}" = "--json" ] && json_mode=true
 
-    require_prj
     local rows=()
     while IFS= read -r line; do
         rows+=("$line")
@@ -507,7 +487,6 @@ cmd_run() {
         -gdb "tcp::${GDB_P}"
     )
     if [ "$enable_shared" = "true" ]; then
-        : "${SHARE:?SHARE not set; source scripts/env.sh first}"
         mkdir -p "$SHARE"
         QEMU_ARGS+=(
             -fsdev "local,security_model=passthrough,id=fsdev0,path=$SHARE/"
@@ -605,10 +584,22 @@ diagnose_vm_state() {
     return 251
 }
 
-cmd_ssh() {
+prepare_ssh_options() {
     require_vm
     : "${SSH_PORT:?SSH_PORT not set}"
     : "${FS:?FS not set}"
+    local key="$FS/bookworm.id_rsa"
+    if [ ! -f "$key" ]; then
+        error "SSH key not found: $key"
+        return 1
+    fi
+    SSH_OPTIONS=(-i "$key" -o StrictHostKeyChecking=no
+                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
+                 -o ConnectTimeout=1)
+}
+
+cmd_ssh() {
+    require_vm
     # Require `--` before the remote command (if any) so the parser is
     # unambiguous and remote commands can freely start with '-'.
     if [ "$#" -gt 0 ]; then
@@ -619,19 +610,8 @@ cmd_ssh() {
         fi
         shift
     fi
-    local key="$FS/bookworm.id_rsa"
-    if [ ! -f "$key" ]; then
-        error "SSH key not found: $key"
-        return 1
-    fi
-    local opts=(
-        -p "$SSH_PORT"
-        -i "$key"
-        -o StrictHostKeyChecking=no
-        -o UserKnownHostsFile=/dev/null
-        -o LogLevel=ERROR
-        -o ConnectTimeout=1
-    )
+    prepare_ssh_options || return $?
+    local opts=(-p "$SSH_PORT" "${SSH_OPTIONS[@]}")
     [ "$#" -gt 0 ] && opts+=(-t)
     local rc=0
     ssh "${opts[@]}" root@localhost "$@" || rc=$?
@@ -645,20 +625,28 @@ cmd_ssh() {
 
 cmd_scp() {
     require_vm
-    : "${SSH_PORT:?SSH_PORT not set}"
-    : "${FS:?FS not set}"
-    if [ "$#" -lt 2 ]; then
-        error "usage: vm.sh scp <src> <dst>  (use 'vm:/path' for the remote side)"
-        exit 1
+    if [ "$#" -ne 2 ]; then
+        error "usage: vm.sh scp <src> <dst> (exactly one vm:/path endpoint)"
+        return 2
     fi
-    local args=() a
+    local args=() a remote=0
     for a in "$@"; do
         case "$a" in
-            vm:*) args+=("root@localhost:${a#vm:}") ;;
-            *)    args+=("$a") ;;
+            vm:*)
+                [ -n "${a#vm:}" ] || { error "Empty VM path"; return 2; }
+                args+=("root@localhost:${a#vm:}")
+                remote=$((remote + 1)) ;;
+            /*|./*|../*) args+=("$a") ;;
+            -*|*:*) error "Use a local path or vm:/path: $a"; return 2 ;;
+            *) args+=("./$a") ;;
         esac
     done
-    exec "$SCRIPT_DIR/scp.sh" "${args[@]}"
+    if [ "$remote" -ne 1 ]; then
+        error "Exactly one endpoint must use vm:/path"
+        return 2
+    fi
+    prepare_ssh_options || return $?
+    exec scp -P "$SSH_PORT" "${SSH_OPTIONS[@]}" -- "${args[@]}"
 }
 
 cmd_gdb() {
@@ -812,45 +800,15 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-require_prj
 
-# Resolve -p → PROFILE / PROFILE_SH + load profile.sh
 if [ -n "$PROFILE_ARG" ]; then
-    validate_scope_name "Profile name" "$PROFILE_ARG" || exit 2
-    PROFILE="$PRJ/profiles/$PROFILE_ARG"
-    PROFILE_SH="$PROFILE/profile.sh"
-    if [ ! -d "$PROFILE" ]; then
-        error "Profile directory missing: $PROFILE"
-        exit 1
-    fi
-    if [ ! -f "$PROFILE_SH" ]; then
-        error "profile.sh missing: $PROFILE_SH"
-        exit 1
-    fi
-    # shellcheck disable=SC1090
-    source "$PROFILE_SH"
-    export PROFILE PROFILE_SH
+    load_profile "$PROFILE_ARG" || exit $?
 fi
-
-# Resolve -v → VM / VM_SH + load vm.sh metadata
 if [ -n "$VM_ARG" ]; then
     if [ -z "$PROFILE_ARG" ]; then
         error "-v requires -p"; exit 2
     fi
-    validate_scope_name "VM name" "$VM_ARG" || exit 2
-    VM="$PROFILE/vms/$VM_ARG"
-    VM_SH="$VM/vm.sh"
-    if [ ! -d "$VM" ]; then
-        error "VM directory missing: $VM"
-        exit 1
-    fi
-    if [ ! -f "$VM_SH" ]; then
-        error "VM metadata missing: $VM_SH"
-        exit 1
-    fi
-    # shellcheck disable=SC1090
-    source "$VM_SH"
-    export VM VM_SH
+    load_vm "$VM_ARG" || exit $?
 fi
 
 # Subcommand dispatch

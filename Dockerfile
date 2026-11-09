@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y \
     # utilities
     nano \
     curl \
+    socat \
     fzf \
     lsof \
     ripgrep \
@@ -123,7 +124,7 @@ RUN git clone --depth=1 https://github.com/google/security-research.git /workspa
 
 RUN git clone --depth=1 https://github.com/google/kernel-research.git /workspace/share/kctf/kernel-research
 
-# Default shell for envsetup.sh compatibility
+# Default interactive shell
 SHELL ["/bin/bash", "-c"]
 
 ENTRYPOINT ["entrypoint.sh"]

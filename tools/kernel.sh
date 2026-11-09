@@ -13,8 +13,9 @@ SCRIPT_DIR="$(realpath "$(dirname "${BASH_SOURCE[0]}")")"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/.common.sh"
 
-# Start clean. -p will repopulate profile-scope vars.
-unset PROFILE PROFILE_SH ARCH LLVM FS KSRC KOBJ KIMAGE
+# Paths are initialized automatically; -p supplies the complete build scope.
+clear_vm_scope
+clear_profile_scope
 
 usage() {
     cat <<'EOF'
@@ -33,16 +34,7 @@ profiles (KSRC + KOBJ).
 EOF
 }
 
-validate_profile_name() {
-    local value="$1"
-    if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-        error "Profile name must contain only letters, digits, '.', '_' or '-', and start with a letter or digit: $value"
-        return 1
-    fi
-}
-
 require_profile() {
-    : "${PRJ:?PRJ not set; source scripts/env.sh first}"
     if [ -z "${PROFILE:-}" ]; then
         error "this subcommand requires -p <profile>"
         exit 2
@@ -111,7 +103,6 @@ cmd_olddefconfig() {
 cmd_kctfconfig() {
     require_profile
     : "${KOBJ:?KOBJ not set; profile is Variant B (KIMAGE) which has no build dir}"
-    : "${CONFIGS:?CONFIGS not set; source env.sh first}"
     local src="$CONFIGS/kernelctf.config"
     if [ ! -f "$src" ]; then
         error "kernelctf.config not found at $src"
@@ -120,7 +111,7 @@ cmd_kctfconfig() {
     mkdir -p "$KOBJ"
     cp "$src" "$KOBJ/.config"
     info "Copied $src → $KOBJ/.config"
-    info "Next: kernel.sh --olddefconfig"
+    info "Next: $SCRIPTS/kernel.sh -p $PROFILE_ARG --olddefconfig"
 }
 
 cmd_build() {
@@ -133,6 +124,9 @@ cmd_build() {
             *) error "Unknown option: $1"; exit 2 ;;
         esac
     done
+    if [[ ! "$jobs" =~ ^[1-9][0-9]*$ ]]; then
+        error "-j requires a positive integer"; return 2
+    fi
     local margs=()
     while IFS= read -r line; do margs+=("$line"); done < <(build_make_args)
     info "make ${margs[*]} -j$jobs"
@@ -180,19 +174,8 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-: "${PRJ:?PRJ not set; source scripts/env.sh first}"
-
 if [ -n "$PROFILE_ARG" ]; then
-    validate_profile_name "$PROFILE_ARG" || exit 2
-    PROFILE="$PRJ/profiles/$PROFILE_ARG"
-    PROFILE_SH="$PROFILE/profile.sh"
-    if [ ! -f "$PROFILE_SH" ]; then
-        error "profile.sh missing: $PROFILE_SH"
-        exit 1
-    fi
-    # shellcheck disable=SC1090
-    source "$PROFILE_SH"
-    export PROFILE PROFILE_SH
+    load_profile "$PROFILE_ARG" || exit $?
 fi
 
 if [ "$#" -eq 0 ]; then
