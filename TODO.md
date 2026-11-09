@@ -1,24 +1,10 @@
 1. AGENTS.md 수정
-    1-1. 취약점 분석은 astra, 익스는 daybreakblue
-2. 디렉토리 구조 변경
-    2-1. 에이전트가 작업의 결과물을 저장할 별도의 공간 제공
-3. skills 작성
+    1-1. 취약점 분석은 astra, 익스는 daybreakblue 맡기도록 작성, 각 에이전트의 행동은 skills를 통해 정의
+3. skills 작성 - 내가 직접 작성할거니까 하지마.
     3-1. 스크립트 사용법
     3-2. 정적 커널 취약점 탐색 방법
     3-3. 동적으로 취약점 증명명
     3-4. 익스플로잇 작성
 4. 스크립트 통폐합 및 수정
     4-1. 환경 변수로 스크립트 사용 편하게 관리
-    4-2. 
 
----
-
-.agents/skills
-config
-dotfiles
-kernels
-save
-user
-agent
-tools
-profiles
