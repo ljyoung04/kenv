@@ -4,20 +4,12 @@
 
 # images: keep dir skeletons, ignore contents
 /images/*
-!/images/arm64/
-!/images/x86/
-/images/arm64/*
-!/images/arm64/.gitkeep
-/images/x86/*
-!/images/x86/.gitkeep
 
-# share: keep dir, ignore everything inside
-/share/*
-!/share/.gitkeep
-
-# androids workspace: keep dir skeleton only
-/androids/*
-!/androids/.gitkeep
+# user & agent: keep dir, ignore everything inside
+/user/*
+!/user/.gitkeep
+/agent/*
+!/agent/.gitkeep
 
 # Common large artifacts
 *.tar.gz
