@@ -1,253 +1,204 @@
 ---
 name: vuln-discovery
-description: 대규모 소스 코드에서 낮은 권한 도달 가능성과 보안 관련성으로 감사 대상을 선별한 뒤, 별도의 분석 에이전트가 정적으로 취약점 후보를 찾고 반증하도록 오케스트레이션한다. 소스 감사·취약점 발굴·정적 선별 요청에 사용하며, PoC 실행·동적 검증·익스플로잇 개발·패치 작성에는 사용하지 않는다.
+description: Select audit targets in large codebases by low-privilege reachability and security relevance, then orchestrate separate analysis agents to find and falsify vulnerability candidates statically. Use for source audits, vulnerability discovery, and static triage, not PoC execution, dynamic validation, exploit development, or patching.
 ---
 
 # Vulnerability Discovery
 
-KernelCTF가 대상이면 현재 공식 규칙에 맞는 후보를 우선한다. 규칙과 대상은 바뀔 수 있으므로
-저장된 기억이나 과거 설정만으로 적격성을 확정하지 않는다.
+For KernelCTF, prioritize candidates consistent with current official rules. Rules and targets can change; do not establish eligibility from memory or historical configurations alone.
 
-대규모 코드베이스를 두 번의 단순한 에이전트 패스로 좁힌다.
+Narrow a large codebase through two simple agent passes.
 
-1. **탐색 에이전트**는 넓고 얕게 읽어 감사 가치가 높은 표면을 찾는다.
-2. **분석 에이전트**는 인계받은 표면을 깊게 읽어 취약점 가설을 세우고 적극적으로 반증한다.
+1. **Exploration agents** read broadly and shallowly to identify surfaces worth auditing.
+2. **Analysis agents** deeply inspect handed-off surfaces, form vulnerability hypotheses, and actively attempt to falsify them.
 
-이 스킬의 최종 산출물은 검증 가능한 정적 근거가 있는 후보와 중요한 부정적 결과다.
-후보 수를 늘리는 것이 목표가 아니다. 스캐너 경고, 위험해 보이는 코드, 모델의 설명은
-그 자체로 취약점이 아니다.
+Deliver candidates with verifiable static evidence and important negative results. Increasing candidate counts is not the goal. Scanner warnings, suspicious code, and model explanations are not vulnerabilities by themselves.
 
-공개 규칙·릴리스 정보로 부족하고 사용자가 정확한 원격 `info` action과
-목적지를 승인한 경우에만 [kctf-official-helper](../kctf-official-helper/SKILL.md)를
-읽고 KernelCTF target·config·공개 아티팩트 정보를 확인할 수 있다.
+Only when public rules and release information are insufficient and the user has authorized the exact remote `info` action and destination may you read [kctf-official-helper](../kctf-official-helper/SKILL.md) and query KernelCTF target, configuration, and public artifact information.
 
-## 범위와 권한
+## Scope and Authorization
 
-- 먼저 저장소의 `AGENTS.md`를 읽고 그 권한, 격리, 모델 배정, 산출물 규칙을 따른다.
-- 이 스킬은 **정적 분석 단계만** 수행한다. 호스트에서 소스 조회, 읽기 전용 이력 조사,
-  정적 분석기 실행, 문서 작성은 가능하다.
-- PoC 또는 퍼저 실행, 커널에 영향을 주는 워크로드, VM 생성, 동적 재현, 악용 가능성
-  실험, 익스플로잇 및 패치 개발은 하지 않는다. 요청 범위에 포함되어 있더라도 해당 단계의
-  전용 스킬과 명시적 권한으로 인계한다.
-- 공개 소스·패치·규칙은 읽기 전용으로만 조회한다. 업로드, 제출, 제3자 연락, 공개는
-  별도 지시 없이는 하지 않는다.
-- 모든 연구 산출물은 `agent/<research-name>/` 아래에 둔다.
+- First read repository `AGENTS.md` and follow its authorization, isolation, model assignment, and artifact rules.
+- Perform **static analysis only**. Source inspection, read-only history research, static analyzers, and documentation may run on the host.
+- Do not run PoCs, fuzzers, kernel-affecting workloads, create VMs, dynamically reproduce defects, experiment with exploitability, or develop exploits or patches. Even if requested, hand those stages off under their dedicated skills and explicit authorization.
+- Access public source, patches, and rules read-only. Do not upload, submit, contact third parties, or disclose without separate instructions.
+- Keep all research artifacts under `agent/<research-name>/`.
 
-## 시작 조건
+## Starting Conditions
 
-오케스트레이터가 다음을 확정하고 `agent/<research-name>/scope.md`에 기록한다.
+The orchestrator establishes and records these in `agent/<research-name>/scope.md`:
 
-- 대상 저장소와 정확한 리비전(커밋 또는 이에 준하는 식별자)
-- 감사 범위와 명시적 제외 범위
-- 위협 모델: 공격자의 시작 권한, 신뢰 경계, 기대 영향
-- 적용되는 빌드 설정, 기능 플래그, 배포 환경
-- 시간·토큰·대상 수 제한과 종료 조건
+- Target repository and exact revision (commit or equivalent identifier)
+- Audit scope and explicit exclusions
+- Threat model: attacker's starting privileges, trust boundary, expected impact
+- Applicable build configuration, feature flags, deployment environment
+- Time, token, and target-count limits and completion conditions
 
-사용자가 정하지 않은 값은 현재 저장소와 요청에서 보수적으로 추론하되, 후보 판정을
-바꿀 수 있는 불확실성은 가정으로 명시한다. 정확한 리비전을 식별할 수 없으면 결과를
-잠정 상태로 표시한다.
+Conservatively infer unspecified values from the current repository and request, but explicitly label uncertainties that could change candidate verdicts as assumptions. Mark results provisional if the exact revision cannot be identified.
 
-### KernelCTF 적격성 사전 게이트
+### Preliminary KernelCTF Eligibility Gate
 
-KernelCTF 후보를 찾는 작업이면 시작 시점의
-[공식 규칙](https://github.com/google/security-research/blob/master/kernelctf/rules.md), 활성 대상,
-LTS 대상과 설정을 읽기 전용으로 확인하고 `scope.md`에 조회 시각과 URL을 기록한다.
-최소한 다음 항목을 독립적으로 추적한다.
+For KernelCTF discovery, check the current [official rules](https://github.com/google/security-research/blob/master/kernelctf/rules.md), active targets, LTS targets, and configurations through read-only access at the start, recording lookup times and URLs in `scope.md`. Track at least these independently:
 
-- `Freshness`: mainline에 수정 커밋이 없고 허용되지 않은 형태로 공개되지 않은 0-day인지
-- `Duplicate`: 같은 근본 원인이나 같은 수정으로 묶이는 기존 제출·공개 이슈가 있는지
-- `Target-build`: 활성 hardened 대상에 코드와 공격 표면이 실제 포함되는지
-- `LTS-trigger`: 규칙이 요구하는 최신 LTS 대상에서도 같은 근본 원인을 트리거할 수 있는지
-- `Attacker`: 공식 시작 UID/GID, capabilities, namespace와 비활성 서브시스템에서 도달 가능한지
-- `Contract`: 현재 규칙의 실행 시간, 안정성, 트리거 인자와 패키징 조건을 충족할 여지가 있는지
+- `Freshness`: Is it a zero-day with no mainline fix commit and no disclosure in a disallowed form?
+- `Duplicate`: Are there existing submissions or public issues sharing the root cause or covered by the same fix?
+- `Target-build`: Are the code and attack surface actually included in the active hardened target?
+- `LTS-trigger`: Can the same root cause be triggered on the latest LTS target required by the rules?
+- `Attacker`: Is it reachable under official starting UID/GID, capabilities, namespaces, and disabled-subsystem conditions?
+- `Contract`: Is there a plausible route to meeting current runtime, stability, trigger-argument, and packaging requirements?
 
-공개 정보만으로 알 수 없는 중복·신선도는 `UNKNOWN`으로 둔다. 이 단계에서는 원격 평가를
-실행하거나 제출 창을 소비하지 않는다. `kctf-official-helper`를 통한 공식 서비스 접속은
-사용자가 행위와 목적지를 승인한 별도 작업이며, 공개 릴리스 정보 조회가 가능하면 이를 우선한다.
+Leave duplicate/freshness questions that public information cannot resolve as `UNKNOWN`. Do not run remote evaluations or consume submission windows at this stage. Accessing official services through `kctf-official-helper` is a separate task requiring user authorization for action and destination; prefer public release information when available.
 
-## 에이전트 배정
+## Agent Assignment
 
-커널 연구에서는 탐색과 분석을 모두 `kernel_astra` 역할, 실제 모델
-`gpt-6-astra`에 배정한다. 작업 생성 결과에서 역할과 모델을 확인한다. 모델이 없거나
-선택이 거부되면 다른 모델로 대체하지 말고 현재까지의 인계 자료를 보존한 뒤 이 단계만
-보류한다.
+For kernel research, assign exploration and analysis to the `kernel_astra` role using the actual model `gpt-6-astra`. Verify role and model in task creation results. If unavailable or rejected, do not substitute another model; preserve handoff materials and suspend only this stage.
 
-오케스트레이터는 두 패스를 직접 관리한다. 탐색 에이전트가 분석 에이전트를 재귀적으로
-만들게 하지 않는다. 병렬 작업이 유리할 때만 작업자를 늘리고 다음을 지킨다.
+The orchestrator directly manages both passes. Do not let exploration agents recursively create analysis agents. Add workers only when parallelism is useful, following these rules:
 
-- 탐색 작업자는 디렉터리·서브시스템·인터페이스별로 겹치지 않는 소유 범위를 갖는다.
-- 분석 작업자는 감사 대상 ID별로 배타적인 소유권을 갖는다.
-- 같은 파일이나 후보를 여러 작업자에게 중복 배정하지 않는다. 독립 재검토가 필요하면
-  중복이 아니라 명시적인 `review` 작업으로 기록한다.
-- 각 작업자는 자기 파일만 작성한다. 공유 인덱스와 `FINDINGS.md`는 오케스트레이터만
-  갱신한다.
-- 가능하면 탐색 결과에 앵커링되지 않은 새 분석 에이전트를 사용한다. 분석 에이전트에는
-  탐색자의 추측이 아니라 아래의 구조화된 감사 대상 기록을 전달한다.
+- Exploration workers own non-overlapping directories, subsystems, or interfaces.
+- Analysis workers have exclusive ownership by audit target ID.
+- Do not duplicate file or candidate assignments. Record needed independent rechecks as explicit `review` tasks.
+- Workers write only their own files. Only the orchestrator updates shared indexes and `FINDINGS.md`.
+- Where possible, use fresh analysis agents not anchored by exploration results. Pass structured audit-target records below rather than explorers' speculation.
 
-## 1단계: 탐색 에이전트
+## Stage 1: Exploration Agents
 
-탐색 에이전트의 목적은 취약점을 단정하는 것이 아니라, 전체 코드 중 깊은 감사 비용을
-쓸 만한 부분을 찾는 것이다. 할당 범위를 넓게 훑고 각 표면을 다음 두 축으로 독립 평가한다.
+The goal is to identify portions of the code worth the cost of deep auditing, not declare vulnerabilities. Survey the assigned scope broadly and independently assess each surface along two dimensions.
 
-### 도달 가능성
+### Reachability
 
-- 낮은 권한 또는 신뢰되지 않은 입력에서 시작하는 구체적인 진입점이 있는가?
-- 어떤 시스템 호출, 파일 연산, ioctl, 소켓, 프로토콜, 파서, IPC, 콜백 또는 비동기
-  작업을 거치는가?
-- 특권, 네임스페이스, 기능 플래그, 장치, 마운트, 네트워크 상태 등 전제 조건은 무엇인가?
+- Is there a concrete entry point from low privileges or untrusted input?
+- Which syscalls, file operations, ioctls, sockets, protocols, parsers, IPC, callbacks, or asynchronous work are involved?
+- What privileges, namespaces, feature flags, devices, mounts, network state, or other prerequisites apply?
 
-### 보안 관련성
+### Security Relevance
 
-- 신뢰 경계를 넘는 입력을 파싱하거나 복사하는가?
-- 객체 수명, 참조 수, 공유 상태, 권한, 자격 증명, 메모리 크기 또는 인덱스를 관리하는가?
-- 복잡한 오류 복구, 비동기 실행, 잠금 전환, 타입 변환, 가변 길이 데이터가 있는가?
-- 결함이 기밀성·무결성·가용성 또는 권한 경계에 영향을 줄 수 있는가?
+- Does it parse or copy input crossing a trust boundary?
+- Does it manage object lifetimes, reference counts, shared state, permissions, credentials, memory sizes, or indices?
+- Are there complex error recovery, asynchronous execution, lock transitions, type conversions, or variable-length data?
+- Could a defect affect confidentiality, integrity, availability, or privilege boundaries?
 
-단순히 파일이 크거나 C/C++처럼 메모리 안전하지 않은 언어라는 이유만으로 선택하지 않는다.
-반대로 작은 어댑터 함수라도 공격자 입력을 중요한 수명·권한 경계로 전달하면 포함한다.
+Do not select code merely because a file is large or written in a memory-unsafe language such as C/C++. Conversely, include even small adapter functions if they pass attacker input across important lifetime or privilege boundaries.
 
-### 탐색 산출물
+### Exploration Artifacts
 
-작업자별 결과를 `agent/<research-name>/exploration/<worker-id>.md`에 쓴다. 각 감사 대상은
-다음 필드를 갖는다.
+Write per-worker results to `agent/<research-name>/exploration/<worker-id>.md`. Each audit target has these fields:
 
 ```text
 Target-ID: T-0001
-Owner-scope: <탐색 작업자의 할당 범위>
-Code: <파일, 디렉터리, 핵심 심볼>
-Entry: <공격자에서 시작하는 진입점>
+Owner-scope: <exploration worker's assigned scope>
+Code: <files, directories, key symbols>
+Entry: <entry point originating with the attacker>
 Reachability: high | medium | low | unknown
 Security-relevance: high | medium | low
-Boundary: <신뢰/권한/수명 경계>
-Attacker-control: <제어 가능한 값과 제약>
-Preconditions: <권한, 설정, 상태>
-Dependencies: <함께 읽어야 할 호출자·피호출자·자료구조>
-Why-audit: <구체적인 감사 이유>
-Why-not: <낮은 우선순위 또는 제외 근거>
+Boundary: <trust/privilege/lifetime boundary>
+Attacker-control: <controllable values and constraints>
+Preconditions: <privileges, configuration, state>
+Dependencies: <callers, callees, and data structures to read together>
+Why-audit: <concrete audit rationale>
+Why-not: <reason for lower priority or exclusion>
 ```
 
-탐색 단계에서는 구체적인 버그 가설이 보이더라도 한두 문장의 관찰로만 남긴다. 깊은 분석을
-시작해 범위 소유권을 흐리지 않는다.
+Even when a specific bug hypothesis appears during exploration, retain only one or two sentences of observation. Do not begin deep analysis and blur scope ownership.
 
-## 탐색→분석 인계 게이트
+## Exploration → Analysis Handoff Gate
 
-오케스트레이터는 탐색 결과를 합치고 `agent/<research-name>/targets.md`를 단독으로 작성한다.
+The orchestrator consolidates exploration results and exclusively writes `agent/<research-name>/targets.md`.
 
-1. 같은 진입점, 객체 수명, 근본 원인을 다루는 표면을 병합한다.
-2. 현재 위협 모델에서 도달할 수 없는 표면은 제외하거나 낮은 우선순위로 내린다.
-3. 도달 가능성과 보안 관련성을 따로 유지한다. 불투명한 단일 점수로 합치지 않는다.
-4. 분석 단위가 너무 크면 호출 경계나 객체 수명별로 나누고, 너무 작으면 불변식을 이해하는 데
-   필요한 이웃 코드와 묶는다.
-5. 모든 포함·제외 결정을 근거와 함께 기록해 미감사 영역을 숨기지 않는다.
+1. Merge surfaces involving the same entry point, object lifetime, or root cause.
+2. Exclude or deprioritize surfaces unreachable under the current threat model.
+3. Keep reachability and security relevance separate; do not combine them into an opaque single score.
+4. Split oversized analysis units by call boundaries or object lifetimes; combine undersized units with neighboring code needed to understand invariants.
+5. Record all inclusion/exclusion decisions with evidence so unaudited areas remain visible.
 
-우선순위는 일반적으로 `도달 가능성 × 보안 관련성 × 공격자 제어`가 높은 대상부터 정한다.
-다만 한 축이 `unknown`인 중요한 경계는 확인 비용이 합리적이면 분석 대상으로 유지한다.
+Generally prioritize targets high in `reachability × security relevance × attacker control`. Retain important boundaries with an `unknown` dimension if resolving it has reasonable cost.
 
-## 2단계: 분석 에이전트
+## Stage 2: Analysis Agents
 
-분석 에이전트는 할당된 감사 대상의 파일만 보는 것이 아니라, 인계된 `Dependencies`와 실제
-호출 관계를 따라 불변식이 시작되고 끝나는 곳까지 읽는다. 먼저 정상 동작을 설명한 다음
-결함을 찾는다.
+Read beyond assigned target files: follow handed-off `Dependencies` and actual call relationships to where invariants begin and end. Explain normal behavior before looking for defects.
 
-1. 공격자 입력에서 민감한 연산까지의 구체적인 호출·데이터 흐름을 재구성한다.
-2. 소유권, 참조 수, 길이, 타입, 잠금, 상태 전이, 권한 검사에 대한 불변식을 적는다.
-3. 정상 경로뿐 아니라 오류 처리, 취소, 재시도, 해제, 비동기 콜백, 교차 스레드 경로를 비교한다.
-4. 코드의 의미에 맞춰 수명 오류, 경계·정수 오류, 경쟁 상태, 초기화되지 않은 데이터,
-   정보 노출, 타입 혼동, 권한 검사 누락, TOCTOU 등의 가능성을 조사한다. 이 목록을 단순
-   패턴 매칭 체크리스트로 사용하지 않는다.
-5. 가설마다 아래 반증 절차를 수행하고 살아남은 것만 후보로 남긴다.
+1. Reconstruct concrete call and data flow from attacker input to sensitive operations.
+2. Document invariants for ownership, reference counts, lengths, types, locks, state transitions, and permission checks.
+3. Compare normal paths with error handling, cancellation, retries, release, asynchronous callbacks, and cross-thread paths.
+4. Investigate lifetime errors, bounds/integer errors, races, uninitialized data, information disclosure, type confusion, missing permission checks, TOCTOU, and related possibilities according to code semantics. Do not use this list as a mere pattern-matching checklist.
+5. Apply the falsification procedure below to every hypothesis, retaining only survivors as candidates.
 
-정적 분석기, CodeQL, 컴파일러 진단, `rg`, `git log`, `git blame` 등의 결과는 탐색 단서다.
-현재 소스에서 호출 경로와 불변식 위반을 직접 확인하기 전에는 후보로 승격하지 않는다.
+Static analyzers, CodeQL, compiler diagnostics, `rg`, `git log`, and `git blame` provide leads. Do not promote them to candidates before directly verifying call paths and invariant violations in current source.
 
-### 필수 반증
+### Required Falsification
 
-각 가설에 대해 최소한 다음 질문에 답한다.
+Answer at least these questions for each hypothesis:
 
-- 진입점이 실제로 현재 리비전과 설정에서 빌드되고 도달 가능한가?
-- 앞선 검증, 길이 제한, 권한 검사, 참조 획득, 잠금 또는 직렬화가 공격 경로를 막는가?
-- 오류·해제·콜백 순서에 대한 가정이 모든 관련 경로에서 성립하는가?
-- 공격자가 필요한 값, 타이밍, 객체 상태를 실제로 제어할 수 있는가?
-- 언어·컴파일러·런타임의 보장이 의심한 동작을 제거하는가?
-- 이미 수정된 코드, 알려진 이슈, 같은 근본 원인의 중복 후보인가?
-- 보안 경계를 넘는 결과인가, 아니면 일반 기능 오류나 자기 자신에게만 미치는 실패인가?
+- Is the entry point actually built and reachable in the current revision and configuration?
+- Do earlier validation, length limits, permission checks, reference acquisition, locks, or serialization block the attack path?
+- Do assumptions about error, release, and callback ordering hold across all relevant paths?
+- Can the attacker actually control required values, timing, and object state?
+- Do language, compiler, or runtime guarantees eliminate the suspected behavior?
+- Is this already fixed, known, or a duplicate candidate with the same root cause?
+- Does the outcome cross a security boundary, or is it an ordinary functional error or self-only failure?
 
-반증되면 버리지 말고 이유와 근거 위치를 남긴다. 확인할 코드나 설정이 없어 판정할 수 없으면
-사실처럼 채우지 않고 `NEEDS_CONTEXT`로 둔다.
+Preserve falsified hypotheses with reasons and evidence locations. If missing code or configuration prevents judgment, use `NEEDS_CONTEXT` rather than filling gaps as facts.
 
-### 후보 기록
+### Candidate Records
 
-분석 작업자는 `agent/<research-name>/analysis/<target-id>-<worker-id>.md`에 다음을 기록한다.
-후보가 없더라도 조사한 경로와 중요한 부정적 결과를 남긴다.
+Analysis workers record the following in `agent/<research-name>/analysis/<target-id>-<worker-id>.md`. Even without candidates, preserve investigated paths and important negative results.
 
 ```text
 Candidate-ID: C-0001
 Target-ID: T-0001
 Status: HYPOTHESIS | SOURCE_CONFIRMED | REJECTED | NEEDS_CONTEXT
-Revision/config: <정확한 대상>
-Class: <결함 유형>
-Root cause: <한 문장>
-Entry path: <공격자 입력부터 결함 지점까지의 심볼 체인>
-Attacker control: <값, 객체, 타이밍과 제약>
-Preconditions: <권한, 설정, 상태>
-Violated invariant: <기대 불변식과 실제 위반>
-Source evidence: <파일:행, 심볼, 관련 분기>
-Security consequence: <정적으로 뒷받침되는 원시 효과와 영향 가설을 구분>
-Falsification: <검사한 방어, 반증 시도, 결과>
-Counterevidence/unknowns: <불리한 근거와 미확인 사항>
-Duplicate/fix check: <중복 또는 수정 여부>
-Next validation: <최소 동적 검증에 필요한 조건; 실행하지 않음>
+Revision/config: <exact target>
+Class: <defect type>
+Root cause: <one sentence>
+Entry path: <symbol chain from attacker input to defect>
+Attacker control: <values, objects, timing, and constraints>
+Preconditions: <privileges, configuration, state>
+Violated invariant: <expected invariant and actual violation>
+Source evidence: <file:line, symbols, relevant branches>
+Security consequence: <separate statically supported primitives from impact hypotheses>
+Falsification: <defenses checked, falsification attempts, results>
+Counterevidence/unknowns: <adverse evidence and unverified points>
+Duplicate/fix check: <duplicate or fix status>
+Next validation: <conditions for minimal dynamic validation; do not execute>
 KernelCTF-eligibility: ELIGIBLE_CANDIDATE | INELIGIBLE | UNKNOWN | NOT_APPLICABLE
-Eligibility evidence: <규칙 버전, 대상/LTS 포함 여부, 공개·패치·중복 검사와 미확인 사항>
+Eligibility evidence: <rules version, target/LTS inclusion, disclosure/patch/duplicate checks and unknowns>
 ```
 
-`SOURCE_CONFIRMED`는 열거한 전제 아래에서 현재 소스의 호출·데이터 흐름과 불변식 위반이
-직접 확인되었다는 뜻이다. 런타임 재현이나 악용 가능성이 확인되었다는 뜻이 아니며 이 스킬은
-`DYNAMIC_CONFIRMED`를 부여하지 않는다. 영향은 관찰 가능한 원시 효과와 추가 검증이 필요한
-상위 보안 결과를 분리한다.
+`SOURCE_CONFIRMED` means call/data flow and invariant violation have been directly verified in current source under listed prerequisites. It does not mean runtime reproduction or exploitability is confirmed; this skill does not assign `DYNAMIC_CONFIRMED`. Separate observable primitives from higher-level security consequences needing further validation.
 
-## 품질 게이트와 우선순위
+## Quality Gates and Prioritization
 
-오케스트레이터는 후보를 그대로 합치지 않고 다음을 확인한다.
+The orchestrator checks rather than simply merging candidates:
 
-- 파일, 심볼, 행 번호, 설정, 호출 경로가 현재 리비전과 일치한다.
-- 근본 원인과 주장한 원시 효과 사이에 빠진 단계가 없다.
-- 후보끼리 진입점이 달라도 같은 불변식 위반이면 하나의 근본 원인으로 묶는다.
-- 도달 가능성, 정적 확신도, 잠재 영향, 동적 검증 비용을 별도 축으로 기록한다.
-- 높은 심각도 표현은 정적 근거의 범위를 넘지 않는다.
+- Files, symbols, line numbers, configurations, and call paths match the current revision.
+- No steps are missing between root cause and claimed primitive.
+- Candidates with different entry points but the same invariant violation are grouped under one root cause.
+- Reachability, static confidence, potential impact, and dynamic-validation cost are recorded separately.
+- High-severity language does not exceed static evidence.
 
-매우 중요한 후보이거나 분석자의 판단이 엇갈리는 경우에만 새 `kernel_astra` 작업자에게
-독립 정적 재검토를 맡긴다. 재검토자에게 결론을 강요하지 말고 원본 코드, 위협 모델,
-후보 기록을 주어 동일한 인과관계가 독립적으로 성립하는지 확인한다.
+Assign independent static re-review to a fresh `kernel_astra` worker only for especially important candidates or conflicting analyst judgments. Do not impose a conclusion; provide original code, threat model, and candidate records to test whether the same causal relationship independently holds.
 
-## 완료와 인계
+## Completion and Handoff
 
-다음이 충족되면 정적 발굴 단계를 종료한다.
+Finish static discovery when:
 
-- 모든 할당 범위가 감사 대상, 제외 대상, 미검토 대상으로 분류되었다.
-- 선택된 모든 감사 대상이 분석되었거나 구체적인 중단 이유가 있다.
-- 후보마다 상태, 정적 근거, 반증 결과, 전제 조건, 다음 검증 단계가 있다.
-- 중복 제거 후 최신 대상 리비전에서 다시 확인했다.
+- All assigned scope is classified as audit targets, exclusions, or unreviewed areas.
+- Every selected audit target has been analyzed or has a concrete stopping reason.
+- Every candidate has a status, static evidence, falsification results, prerequisites, and next validation step.
+- Candidates have been deduplicated and rechecked on the latest target revision.
 
-`agent/<research-name>/FINDINGS.md`에는 다음만 간결하게 모은다.
+Concisely collect only the following in `agent/<research-name>/FINDINGS.md`:
 
-- 대상 리비전, 위협 모델, 실제 확인된 역할·모델
-- 탐색 범위와 커버리지, 제외·미검토 영역
-- 우선순위가 정해진 `SOURCE_CONFIRMED` 및 `HYPOTHESIS` 후보
-- 중요한 `REJECTED` 결과와 재탐색을 막을 근거
-- `NEEDS_CONTEXT` 항목과 필요한 입력
-- 다음 단계가 사용할 증거 경로와 파일 해시
+- Target revision, threat model, verified actual roles/models
+- Exploration scope and coverage, excluded and unreviewed areas
+- Prioritized `SOURCE_CONFIRMED` and `HYPOTHESIS` candidates
+- Important `REJECTED` results and evidence preventing redundant exploration
+- `NEEDS_CONTEXT` items and required inputs
+- Evidence paths and file hashes for the next stage
 
-후보가 없으면 “취약점 없음”이라고 일반화하지 않는다. 감사한 범위, 적용한 위협 모델,
-남은 사각지대 안에서 정적 후보를 확인하지 못했다고 보고한다. 예산이 끝나면 새 가설을
-만들지 말고 커버리지와 미완료 항목을 보존한다.
+If no candidates are found, do not generalize to “no vulnerabilities.” Report that no static candidates were confirmed within the audited scope, applied threat model, and remaining blind spots. When the budget ends, stop generating new hypotheses and preserve coverage and unfinished items.
 
-## 설계 근거
+## Design Rationale
 
-이 두 단계 구조는 OpenAI의
-[루트 권한 탈취 경로 1,000개 줄이기](https://openai.com/ko-KR/index/a-thousand-fewer-paths-to-root/)
-연구에서 사용한 방식처럼, 먼저 접근 가능성과 보안 관련성으로 감사 표면을 줄이고 별도의
-분석 에이전트가 대상의 동작과 위협 모델을 이해한 뒤 후보를 찾는 흐름을 따른다. 운영은
-의도적으로 단순하게 유지하며, 초기 오탐을 줄여 이후 동적 검증 비용과 사람의 검토 부담을
-낮추는 것을 우선한다.
+This two-stage structure follows the approach in OpenAI's [A thousand fewer paths to root](https://openai.com/ko-KR/index/a-thousand-fewer-paths-to-root/): first narrow audit surfaces by reachability and security relevance, then have separate analysis agents understand behavior and the threat model before finding candidates. Operations remain deliberately simple, prioritizing fewer early false positives to reduce subsequent dynamic-validation costs and human review burden.
 

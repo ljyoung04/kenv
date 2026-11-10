@@ -1,43 +1,34 @@
 ---
 name: patch-generation
-description: 동적으로 확인된 Linux 커널 취약점의 근본 원인을 최소 변경으로 수정하고, 주변 코드 관행·정적 검사·빌드·재현기 회귀·변종 및 우회 분석으로 패치의 정확성과 완전성을 검증한다. 보안 패치 생성과 검토에 사용하며 취약점 발굴, 익스플로잇 개발, 업스트림 제출은 별도 단계다.
+description: Fix root causes of dynamically confirmed Linux kernel vulnerabilities with minimal changes, and validate patch correctness and completeness through local coding conventions, static checks, builds, reproducer regression, and variant/bypass analysis. Use for security patch creation and review; vulnerability discovery, exploit development, and upstream submission are separate stages.
 ---
 
 # Patch Generation
 
-검증된 취약점마다 근본 원인을 고치는 검토 가능한 패치 후보를 만든다. 재현기 한 개만 조용히
-만드는 완화가 아니라 위반된 불변식을 회복하고, 기능·성능·호환성·동시성 요구와 주변 코드의
-개발 관행을 함께 만족해야 한다.
+Produce reviewable patch candidates that fix the root cause of each validated vulnerability. Restore the violated invariant rather than merely silencing one reproducer, while meeting functional, performance, compatibility, and concurrency requirements and surrounding development conventions.
 
-## 범위와 시작 게이트
+## Scope and Entry Gate
 
-- 먼저 `AGENTS.md`, 정적 후보, `validation.md`, 필요하면 `exploitability.md`와 독립 인과
-  검토를 읽는다. 패치 생성이 승인된 Candidate-ID/Target-ID만 다룬다.
-- 최소 입력은 정확한 취약 리비전·설정, `DYNAMIC_CONFIRMED` 근거, 최소 재현기와 원본 로그,
-  위반 불변식이다. 작동하는 익스플로잇은 필수 입력이 아니며 악용 실패를 패치 보류 이유로 삼지 않는다.
-- `kernel_astra`/`gpt-6-astra`에 생성·검증을 배정하고 실제 역할과 모델을 기록한다. 지원되지
-  않으면 대체 모델로 결과를 가장하지 않고 이 단계를 보류한다.
-- 소스 조회·편집·정적 검사·빌드는 호스트에서 할 수 있다. 재현기, 익스플로잇과 커널에 영향을
-  주는 회귀 실행은 작업 소유 VM에서만 한다. 기존 소스 트리의 사용자 변경을 덮어쓰지 않는다.
-- 산출물은 `agent/<research-name>/patch/<candidate-id>/`에 두고, 원본 커널 소스에는 사용자가
-  요청하지 않은 커밋·푸시를 하지 않는다. 외부 제출·연락·공개도 하지 않는다.
+- First read `AGENTS.md`, the static candidate, `validation.md`, and, when needed, `exploitability.md` and the independent causal review. Handle only Candidate-IDs/Target-IDs authorized for patch generation.
+- Minimum inputs are the exact vulnerable revision/configuration, `DYNAMIC_CONFIRMED` evidence, minimal reproducer and original logs, and violated invariant. A working exploit is not required; failed exploitation is not a reason to defer patching.
+- Assign generation and validation to `kernel_astra`/`gpt-6-astra`; record the actual role/model. If unsupported, suspend this stage rather than misrepresenting results from another model.
+- Source inspection, edits, static checks, and builds may run on the host. Run reproducers, exploits, and regression workloads affecting the kernel only in task-owned VMs. Do not overwrite user changes in existing source trees.
+- Store artifacts in `agent/<research-name>/patch/<candidate-id>/`. Do not make unrequested commits or pushes in the original kernel source. Do not submit externally, contact third parties, or disclose.
 
-## 1. 최신 대상에서 재확인
+## 1. Recheck the Latest Target
 
-패치 작성 전에 기준을 고정한다.
+Fix the baseline before writing a patch.
 
-1. 인계된 취약 리비전과 현재 최신 검토 대상 리비전을 구분한다.
-2. 최신 코드와 공개 이력에서 이미 병합되었거나 대기 중인 수정, 같은 근본 원인의 중복,
-   관련 리팩터링을 확인한다.
-3. 최신 코드에서 진입 경로, 위반 불변식과 재현 가능성이 유지되는지 확인한다.
-4. 이미 올바르게 고쳐졌다면 새 패치를 만들지 않고 `ALREADY_FIXED`로 근거 커밋과 적용 범위를 남긴다.
+1. Distinguish the handed-off vulnerable revision from the latest revision under review.
+2. Check current code and public history for merged or pending fixes, duplicates sharing the root cause, and related refactoring.
+3. Verify that the entry path, violated invariant, and reproducibility remain in current code.
+4. If already correctly fixed, record `ALREADY_FIXED` with the supporting commit and scope instead of creating a new patch.
 
-최신 코드에서 사라진 후보를 과거 리비전용 새 zero-day 패치처럼 보고하지 않는다. 인계된
-리비전에만 필요한 백포트가 범위라면 업스트림 수정과의 차이를 명시한다.
+Do not present a candidate absent from current code as a new zero-day patch for a historical revision. If scope covers a backport needed only for the handed-off revision, state its differences from the upstream fix.
 
-## 2. 수정 설계
+## 2. Fix Design
 
-`patch-analysis.md`에 다음을 먼저 작성한다.
+First write the following in `patch-analysis.md`:
 
 ```text
 Candidate-ID / Target-ID:
@@ -52,93 +43,79 @@ Alternative fixes and rejected tradeoffs:
 Chosen invariant-restoring change:
 ```
 
-주변 파일과 같은 서브시스템의 성공·오류 경로, 잠금 규칙, 참조 수 관행, helper, 코딩 스타일과
-테스트 방식을 읽는다. 다음 원칙을 우선한다.
+Read surrounding files and the subsystem's success/error paths, locking rules, reference-count conventions, helpers, coding style, and tests. Prioritize these principles:
 
-- 결함을 허용한 가장 이른 경계에서 공격자 입력이나 상태를 검증한다.
-- 객체 수명·소유권·잠금·길이의 불변식을 모든 경로에서 대칭적으로 회복한다.
-- 불필요한 새 추상화, 광범위한 리팩터링, ABI 변경과 핫패스 비용을 피한다.
-- `WARN`, 크래시, 기능 비활성화나 재현기 패턴 차단만으로 메모리 안전 결함을 덮지 않는다.
-- 오류 코드, cleanup 순서, lock ordering, allocation flag와 context 제약을 보존한다.
+- Validate attacker inputs or state at the earliest boundary that permits the defect.
+- Restore object lifetime, ownership, locking, and length invariants symmetrically across all paths.
+- Avoid unnecessary abstractions, broad refactoring, ABI changes, and hot-path costs.
+- Do not cover memory-safety defects merely with `WARN`, crashes, disabling functionality, or blocking reproducer patterns.
+- Preserve error codes, cleanup order, lock ordering, allocation flags, and context constraints.
 
-## 3. 패치 작성과 정적 검토
+## 3. Patch Writing and Static Review
 
-하나의 근본 원인에 필요한 최소 diff를 만들고 `fix.patch`로 보존한다. 패치 설명에는 사용자에게
-검증된 사실만 사용해 증상, 근본 원인, 수정 불변식과 검증 결과를 연결한다. CVE, 심각도,
-`Fixes:` 또는 보고자 정보가 확인되지 않았으면 만들어내지 않는다.
+Create the minimum diff needed for one root cause and preserve it as `fix.patch`. Use only verified facts in the proposed explanation to connect symptoms, root cause, restored invariant, and validation results. Do not invent unverified CVEs, severity, `Fixes:` tags, or reporter information.
 
-정적 검토에서는 최소한 다음을 확인한다.
+At minimum, check:
 
-- 변경된 모든 성공·오류·취소·해제·재시도·비동기 경로에서 불변식이 유지되는가?
-- 잠금 범위, 경쟁 창, 참조 획득/해제, 정수 변환과 usercopy 경계에 새 문제가 없는가?
-- 새 반환값이나 상태가 모든 호출자에서 처리되는가?
-- 컴파일 설정에 따른 `#ifdef`, stub, 아키텍처별 경로에도 정의·동작이 일치하는가?
-- 주변 스타일, helper와 커널 코딩 관행을 따르고 불필요한 주석·중복 코드가 없는가?
+- Does the invariant hold across all changed success, error, cancellation, release, retry, and asynchronous paths?
+- Are there new problems in lock scope, race windows, reference acquisition/release, integer conversions, or usercopy boundaries?
+- Do all callers handle new return values or states?
+- Are definitions and behavior consistent across configuration-dependent `#ifdef` branches, stubs, and architecture-specific paths?
+- Does the change follow local style, helpers, and kernel conventions without unnecessary comments or duplicate code?
 
-가능한 범위에서 `git diff --check`, 관련 컴파일러 진단과 서브시스템 정적 검사 도구를 실행한다.
-도구 경고는 현재 소스에서 의미를 확인하고, 검사하지 못한 항목을 통과로 기록하지 않는다.
+Run `git diff --check`, relevant compiler diagnostics, and subsystem static-check tools where possible. Interpret warnings against current source; do not record unperformed checks as passing.
 
-## 4. 변종과 공격자 관점 검토
+## 4. Variant and Attacker-Perspective Review
 
-재현 경로 주변만 보지 말고 같은 불변식을 공유하는 코드를 검색한다.
+Search code sharing the same invariant, beyond the immediate reproduction path.
 
-- 같은 helper·구조체·상태 머신·allocation/free 패턴의 다른 호출자
-- 오류 처리, 취소, timeout, teardown, 중복 요청과 교차 스레드 경로
-- 길이·타입·플래그의 다른 조합, compat syscall, 아키텍처와 설정 변형
-- 패치 전 검사를 우회하는 대체 진입점이나 검사 후 상태가 바뀌는 TOCTOU
-- 수정이 한 변종만 막고 같은 근본 원인을 다른 위치에 남기는지
+- Other callers of the same helpers, structures, state machines, or allocation/free patterns
+- Error handling, cancellation, timeout, teardown, duplicate requests, and cross-thread paths
+- Other combinations of lengths, types, and flags; compat syscalls; architecture and configuration variants
+- Alternative entry points bypassing checks before the patch, or TOCTOU state changes after checks
+- Whether the fix blocks only one variant while leaving the same root cause elsewhere
 
-각 항목을 `variants.md`에 `FIXED_BY_PATCH`, `NOT_AFFECTED`, `SEPARATE_CANDIDATE`,
-`UNRESOLVED`로 분류하고 소스 근거를 붙인다. 별도 근본 원인은 현재 패치를 부풀리지 말고 새
-후보로 인계한다. 작동하는 익스플로잇이 있으면 개발자가 아닌 독립 작업자가 패치 우회 가능성을
-검토하되, 범위를 새로운 공격 표면 발굴로 무제한 확대하지 않는다.
+Classify each item in `variants.md` as `FIXED_BY_PATCH`, `NOT_AFFECTED`, `SEPARATE_CANDIDATE`, or `UNRESOLVED`, with source evidence. Hand separate root causes off as new candidates instead of inflating the current patch. If a working exploit exists, have an independent worker other than its developer review bypass possibilities, without unlimited expansion into new attack-surface discovery.
 
-## 5. 빌드와 동적 회귀
+## 5. Builds and Dynamic Regression
 
-`test-plan.md`에서 패치 전후 비교와 기능 회귀를 명시한 뒤 실행한다.
+Specify before/after comparisons and functional regression in `test-plan.md` before executing.
 
-1. 정확한 base에서 원본 재현기가 예상 증거를 내는지 확인한다.
-2. 깨끗한 소스에 `fix.patch`가 충돌 없이 적용되는지 확인한다.
-3. 대상 설정과 필요한 대표 설정으로 빌드한다. 변경 서브시스템을 실제 포함했는지 확인한다.
-4. 작업 소유 VM에서 같은 재현기를 같은 권한·입력·시도 조건으로 실행해 결함이 사라지는지 본다.
-5. 정상 입력, 경계 입력, 오류·취소 경로와 관련 기존 테스트로 기능 회귀를 확인한다.
-6. exploit가 있으면 동일 대상 완화를 유지한 패치 커널에서 다시 실행한다.
-7. sanitizer 경고, lockdep, refcount, 누수, 성능 또는 timeout의 새 이상을 점검한다.
+1. Verify that the original reproducer produces expected evidence on the exact base.
+2. Verify that `fix.patch` applies cleanly to pristine source.
+3. Build with the target configuration and necessary representative configurations; verify the modified subsystem is actually included.
+4. Run the same reproducer in a task-owned VM with the same privileges, inputs, and attempt conditions to check that the defect disappears.
+5. Check functional regression with normal and boundary inputs, error/cancellation paths, and relevant existing tests.
+6. If an exploit exists, rerun it on the patched kernel with the same target mitigations.
+7. Check for new sanitizer, lockdep, refcount, leak, performance, or timeout anomalies.
 
-재현기가 더 이상 크래시하지 않는 것만으로 수정 완료를 주장하지 않는다. 패치된 경로가 실제
-실행되었고 정상 동작으로 종료했는지, 원인이 제거되었는지 소스와 런타임 양쪽에서 확인한다.
-빌드나 실험 환경이 없으면 `UNVALIDATED`로 남기며 결과를 추정하지 않는다.
+Do not claim completion merely because the reproducer no longer crashes. Verify in source and at runtime that the patched path actually executes, completes normally, and removes the cause. Without build or experiment infrastructure, leave the result `UNVALIDATED`; do not infer outcomes.
 
-## 판정과 산출물
+## Verdicts and Artifacts
 
-| 상태 | 기준 |
+| Status | Criteria |
 |---|---|
-| `PATCH_VALIDATED` | 최소 수정이 근본 원인을 제거하고 빌드·재현 회귀·기능 회귀·변종 검토를 통과했다. |
-| `PATCH_PARTIAL` | 일부 경로는 고쳤지만 변종·설정·회귀의 미해결 항목이 있다. |
-| `PATCH_UNVALIDATED` | 후보 패치는 있으나 필수 빌드 또는 동적 검증을 완료하지 못했다. |
-| `ALREADY_FIXED` | 최신 대상에 기존 수정이 있으며 그 수정과 범위를 확인했다. |
-| `RETURN_TO_ANALYSIS` | 근본 원인 또는 인과관계가 부족해 안전한 수정 범위를 정할 수 없다. |
-| `INFRA_BLOCKED` | 유효한 빌드·VM 환경 문제로 검증하지 못했다. |
+| `PATCH_VALIDATED` | A minimal fix removes the root cause and passes build, reproducer regression, functional regression, and variant review. |
+| `PATCH_PARTIAL` | Some paths are fixed, but variants, configurations, or regressions remain unresolved. |
+| `PATCH_UNVALIDATED` | A candidate patch exists, but required builds or dynamic validation are incomplete. |
+| `ALREADY_FIXED` | An existing fix in the latest target and its scope have been verified. |
+| `RETURN_TO_ANALYSIS` | Insufficient root-cause or causal evidence prevents defining a safe fix scope. |
+| `INFRA_BLOCKED` | Build/VM infrastructure problems prevented valid validation. |
 
 ```text
-patch-analysis.md       근본 원인, 요구사항, 대안과 선택 근거
-fix.patch               정확한 base에 적용되는 최소 패치
-commit-message.txt      확인된 사실만 담은 제안 설명
-variants.md             관련 경로·우회·변종 분석
-test-plan.md            전후 비교와 회귀 계획
-build/                  명령, 설정·도구 버전, 결과 로그
-tests/<run-id>/         재현·정상·경계·exploit 원본 증거
-patch-review.md         최종 판정, 남은 위험, 적용 범위
-SHA256SUMS              인계 파일 해시
+patch-analysis.md       Root cause, requirements, alternatives, selection rationale
+fix.patch               Minimal patch applying to the exact base
+commit-message.txt      Proposed explanation containing only confirmed facts
+variants.md             Related paths, bypasses, and variant analysis
+test-plan.md            Before/after comparisons and regression plan
+build/                  Commands, configurations/tool versions, result logs
+tests/<run-id>/         Original reproduction/normal/boundary/exploit evidence
+patch-review.md         Final verdict, remaining risks, applicability
+SHA256SUMS              Handoff file hashes
 ```
 
-`FINDINGS.md`에는 패치 상태, base 리비전, 수정한 불변식, 시험 결과, 변종과 남은 위험, 증거
-경로·해시를 병합한다. `human-report`에는 패치뿐 아니라 적용 기준, 실패 로그와 미검증 범위도
-함께 인계한다.
+Merge patch status, base revision, restored invariant, test results, variants, remaining risks, and evidence paths/hashes into `FINDINGS.md`. Hand off applicability criteria, failure logs, and unvalidated scope along with the patch to `human-report`.
 
-## 설계 근거
+## Design Rationale
 
-OpenAI의 [루트 권한 탈취 경로 1,000개 줄이기](https://openai.com/ko-KR/index/a-thousand-fewer-paths-to-root/)
-중 관련 소스 전체를 제공한 패치 생성, 주변 개발 관행 준수, 정적 검사, 최소 변경, 변종·우회
-분석과 반복 개선 원칙을 반영했다. 재현기만 통과하는 기능 수정과 검토 가능한 보안 패치를
-구분하기 위해 기능적·비기능적 요구를 모두 게이트로 둔다.
+Reflects patch generation with full relevant source, adherence to local development conventions, static checks, minimal changes, variant/bypass analysis, and iterative improvement in OpenAI's [A thousand fewer paths to root](https://openai.com/ko-KR/index/a-thousand-fewer-paths-to-root/). Both functional and non-functional requirements are gates to distinguish a reviewable security patch from a functional fix that merely passes the reproducer.
