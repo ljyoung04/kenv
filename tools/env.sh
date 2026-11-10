@@ -2,11 +2,11 @@
 # linux-env: profile + vm context entry point. SOURCE ONLY.
 #
 # Usage:
-#   source scripts/env.sh                          # ensure globals + show current
-#   source scripts/env.sh --profile <name>         # enter profile
-#   source scripts/env.sh --vm <name>              # enter vm (within current profile)
-#   source scripts/env.sh --profile <p> --vm <v>   # enter both
-#   source scripts/env.sh --reset                  # clear profile/vm scope
+#   source tools/env.sh                          # ensure globals + show current
+#   source tools/env.sh --profile <name>         # enter profile
+#   source tools/env.sh --vm <name>              # enter vm (within current profile)
+#   source tools/env.sh --profile <p> --vm <v>   # enter both
+#   source tools/env.sh --reset                  # clear profile/vm scope
 #
 # All output messages are English. The shell-state contract is:
 #   global  scope  : PRJ, SCRIPTS, CONFIGS, IMAGES, SHARE, SYZKALLER (always force-set)
@@ -34,31 +34,14 @@ if [ "${_envlx_self}" = "$0" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Globals (always force-export; override any pre-existing values)
+# Load paths and scope helpers without changing the caller's shell options.
 # ---------------------------------------------------------------------------
-export SCRIPTS="$(realpath "$(dirname "${_envlx_self}")")"
-export PRJ="$(dirname "$SCRIPTS")"
-export CONFIGS="$PRJ/configs"
-export IMAGES="$PRJ/images"
-export SHARE="$PRJ/share"
-export SYZKALLER="$PRJ/syzkaller"
+source "$(dirname "$(realpath "$_envlx_self")")/.common.sh"
 unset _envlx_self
-
-# Diagnostic helpers (info/warn/error to stderr).
-# shellcheck disable=SC1091
-source "$SCRIPTS/.common.sh"
 
 # ===========================================================================
 # Internal helpers (re-defined every source; private prefix _envlx_)
 # ===========================================================================
-
-_envlx_unset_vm_scope() {
-    unset VM VM_SH SSH_PORT GDB_PORT
-}
-
-_envlx_unset_profile_scope() {
-    unset PROFILE PROFILE_SH KSRC KOBJ KIMAGE ARCH LLVM FS
-}
 
 _envlx_print_current() {
     if [ -z "${PROFILE:-}" ]; then
@@ -96,7 +79,7 @@ _envlx_print_current() {
     # Restore command on its own last line: bare command, no prefix, so it
     # can be selected/copied in one go and pasted into another shell.
     if [ -n "${PROFILE:-}" ]; then
-        local _restore="source \$SCRIPTS/env.sh --profile $(basename "$PROFILE")"
+        local _restore="source $(printf '%q' "$SCRIPTS/env.sh") --profile $(basename "$PROFILE")"
         if [ -n "${VM:-}" ]; then
             _restore="$_restore --vm $(basename "$VM")"
         fi
@@ -116,8 +99,8 @@ export LLVM=19
 export FS=$IMAGES/x64
 
 # Variant A (build kernel from source) -- uncomment KSRC + KOBJ:
-#export KSRC= $PRJ/kernels/...
-#export KOBJ= $KSRC/build/debug
+#export KSRC="$PRJ/kernels/..."
+#export KOBJ="$KSRC/build/debug"
 
 # Variant B (use a prebuilt bzImage) -- uncomment KIMAGE:
 #export KIMAGE=
@@ -148,46 +131,23 @@ _envlx_validate_profile() {
 # and 2 when a template was created (caller-friendly: nothing to do further).
 _envlx_enter_profile() {
     local name="$1"
+    validate_scope_name "Profile name" "$name" || return 1
     local pdir="$PRJ/profiles/$name"
     local psh="$pdir/profile.sh"
 
     if [ ! -f "$psh" ]; then
         warn "Profile '$name' does not exist."
         info "Creating template at: $psh"
-        _envlx_make_template "$pdir"
+        _envlx_make_template "$pdir" || return 1
         info "Edit it, then run: source \$SCRIPTS/env.sh --profile $name"
         return 2
     fi
 
-    export PROFILE="$pdir"
-    export PROFILE_SH="$psh"
-    # shellcheck disable=SC1090
-    source "$PROFILE_SH"
+    load_profile "$name" || return 1
     if ! _envlx_validate_profile; then
+        clear_profile_scope
         return 1
     fi
-    return 0
-}
-
-# Enter a vm by name (within current $PROFILE).
-_envlx_enter_vm() {
-    local name="$1"
-    if [ -z "${PROFILE:-}" ]; then
-        error "No profile selected. Use: source \$SCRIPTS/env.sh --profile <name>"
-        return 1
-    fi
-    local vdir="$PROFILE/vms/$name"
-    local vsh="$vdir/vm.sh"
-    if [ ! -f "$vsh" ]; then
-        error "VM '$name' not found at $vsh"
-        error "Boot it first: \$SCRIPTS/vm.sh run $name"
-        return 1
-    fi
-    export VM="$vdir"
-    export VM_SH="$vsh"
-    # shellcheck disable=SC1090
-    source "$VM_SH"
-    return 0
 }
 
 # ===========================================================================
@@ -246,7 +206,11 @@ vm() {
     local _p="$_p_override"
     [ -z "$_p" ] && [ -n "${PROFILE:-}" ] && _p="$(basename "$PROFILE")"
     local _v="$_v_override"
-    [ -z "$_v" ] && [ -n "${VM:-}" ] && _v="$(basename "$VM")"
+    # A one-shot profile override must not reuse a VM from a different profile.
+    if [ -z "$_v" ] && [ -n "${VM:-}" ] && [ -n "${PROFILE:-}" ] \
+       && [ "$_p" = "$(basename "$PROFILE")" ]; then
+        _v="$(basename "$VM")"
+    fi
 
     local subcmd="${1:-}"
     if [ -z "$subcmd" ]; then
@@ -303,7 +267,7 @@ vm() {
             # Only unset shell scope if we removed the VM the scope points to.
             if [ "$_rc" -eq 0 ] && [ -n "${PROFILE:-}" ] && [ -n "${VM:-}" ] \
                && [ "$_p" = "$(basename "$PROFILE")" ] && [ "$_target" = "$(basename "$VM")" ]; then
-                _envlx_unset_vm_scope
+                clear_vm_scope
             fi
             ;;
         ssh|scp|gdb|attach|kill|log)
@@ -315,7 +279,7 @@ vm() {
             "$SCRIPTS/vm.sh" -p "$_p" -v "$_v" "$subcmd" "$@" || _rc=$?
             if [ "$_rc" -eq 0 ] && [ "$subcmd" = "kill" ] && [ -n "${PROFILE:-}" ] && [ -n "${VM:-}" ] \
                && [ "$_p" = "$(basename "$PROFILE")" ] && [ "$_v" = "$(basename "$VM")" ]; then
-                _envlx_unset_vm_scope
+                clear_vm_scope
             fi
             ;;
         *)
@@ -331,7 +295,8 @@ vm() {
 # `kernel`: human-facing shim around $SCRIPTS/kernel.sh. Auto-injects -p from
 # the current $PROFILE so users don't have to retype it.
 kernel() {
-    if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    if [ "$#" -eq 0 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] \
+       || [ "${1:-}" = "-p" ] || [ "${1:-}" = "--profile" ]; then
         "$SCRIPTS/kernel.sh" "$@"
         return $?
     fi
@@ -342,116 +307,38 @@ kernel() {
     "$SCRIPTS/kernel.sh" -p "$(basename "$PROFILE")" "$@"
 }
 
+# Connect using the bundled certificate; independent of profile/VM selection.
+connect() { "$SCRIPTS/connect.sh" "$@"; }
+
 # ---------------------------------------------------------------------------
-# FS helpers (parity with envsetup.sh; profile-context independent)
+# Image helpers: implementation lives in fs.sh for direct CLI use too.
 # ---------------------------------------------------------------------------
 
-lsfs() {
-    if [ ! -d "$IMAGES" ]; then
-        error "Images directory not found: $IMAGES"
-        return 1
-    fi
-    local found=0 current_name=""
-    [ -n "${FS:-}" ] && current_name="$(basename "$FS")"
-    local dir name img size marker status arch
-    for dir in "$IMAGES"/*/; do
-        [ -d "$dir" ] || continue
-        name="$(basename "$dir")"
-        img="$dir/bookworm.img"
-        [ -f "$img" ] || continue
-        found=1
-        size=$(du --apparent-size -h "$img" 2>/dev/null | cut -f1)
-        marker="  "
-        [ "$name" = "$current_name" ] && marker="* "
-        status=""
-        fuser "$img" >/dev/null 2>&1 && status=" [IN USE]"
-        arch="?"
-        [ -f "$dir/.arch" ] && arch=$(cat "$dir/.arch")
-        printf "%s[%s] bookworm.img (%s, %s)%s\n" "$marker" "$name" "$size" "$arch" "$status"
-    done
-    [ "$found" -eq 0 ] && warn "No bookworm.img found under $IMAGES"
-    [ -z "$current_name" ] && { echo ""; warn "FS not set"; }
-}
+lsfs() { "$SCRIPTS/fs.sh" ls "$@"; }
 
 setfs() {
-    if [ -z "${1:-}" ]; then
-        error "Usage: setfs <name>"
-        return 1
+    if [ "$#" -ne 1 ]; then
+        error "Usage: setfs <name>"; return 2
     fi
+    validate_scope_name "Image name" "$1" || return 2
     local target="$IMAGES/$1"
     if [ ! -d "$target" ]; then
-        error "Directory not found: $target"
-        lsfs
-        return 1
+        error "Directory not found: $target"; return 1
     fi
     export FS="$target"
-    info "FS: $FS"
+    info "FS: $FS (shell only; edit profile.sh to change VM images)"
 }
 
 mkfs() {
-    local name="" arch="${ARCH:-x86_64}" size=5120 distro="bookworm"
-
-    if [ $# -eq 0 ] || [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-        cat <<'EOF'
-Usage: mkfs <name> [-a arch] [-s size_MB] [-d distro]
-  <name>       image directory name (required)
-  -a, --arch   architecture (default: $ARCH)
-  -s, --size   image size in MB (default: 5120)
-  -d, --distro debian distribution (default: bookworm)
-EOF
-        return 0
-    fi
-
-    if [[ "$1" == -* ]]; then
-        error "Usage: mkfs <name> [-a arch] [-s size_MB] [-d distro]"
-        return 1
-    fi
-    name="$1"; shift
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            -a|--arch)   arch="$2"; shift 2 ;;
-            -s|--size)   size="$2"; shift 2 ;;
-            -d|--distro) distro="$2"; shift 2 ;;
-            -h|--help)   mkfs --help; return 0 ;;
-            *) error "Unknown option: $1"; return 1 ;;
-        esac
+    # Keep the familiar interactive name without duplicating creation logic.
+    local arg
+    for arg in "$@"; do
+        case "$arg" in -h|--help) "$SCRIPTS/fs.sh" create --help; return $? ;; esac
     done
-
-    local img_dir="$IMAGES/$name"
-    local img_file="$img_dir/$distro.img"
-    if [ -f "$img_file" ]; then
-        error "Image already exists: $img_file"
-        return 1
-    fi
-
-    local ci_arch="$arch"
-    case "$arch" in
-        arm64)  ci_arch="aarch64" ;;
-        amd64)  ci_arch="x86_64"  ;;
-    esac
-
-    info "Creating filesystem image: images/$name/  (arch=$ci_arch, distro=$distro, size=${size}MB)"
-    mkdir -p "$img_dir"
-    echo "$ci_arch" > "$img_dir/.arch"
-
-    local prev_dir="$PWD"
-    if ! ( cd "$img_dir" && sudo "$SCRIPTS/create-image.sh" -a "$ci_arch" -d "$distro" -s "$size" ); then
-        error "create-image.sh failed"
-        return 1
-    fi
-
-    sudo chown "$(id -u):$(id -g)" "$img_dir"/* 2>/dev/null || true
-    if [ -d "$img_dir/$distro" ]; then
-        info "Cleaning up debootstrap directory..."
-        sudo rm -rf "$img_dir/$distro"
-    fi
-
-    if [ ! -f "$img_file" ]; then
-        error "Image file not created: $img_file"
-        return 1
-    fi
-    info "Created: images/$name/$distro.img"
+    if [ "$#" -eq 0 ]; then "$SCRIPTS/fs.sh" create --help; return $?; fi
+    local name="$1"
+    shift
+    "$SCRIPTS/fs.sh" create "$name" -a "${ARCH:-x86_64}" "$@" || return $?
     setfs "$name"
 }
 
@@ -527,25 +414,33 @@ done
 # ---------------------------------------------------------------------------
 
 if [ "$_envlx_no_args" -eq 1 ]; then
-    # Refresh from on-disk metadata so stale shell state (e.g. SSH_PORT from a
-    # prior `vm run vm1` that was later killed and re-run) is replaced with the
-    # current vm.sh / profile.sh values.
-    if [ -n "${PROFILE_SH:-}" ] && [ -f "$PROFILE_SH" ]; then
-        # shellcheck disable=SC1090
-        source "$PROFILE_SH"
+    _envlx_saved_profile="${PROFILE:-}"
+    _envlx_saved_profile="${_envlx_saved_profile##*/}"
+    _envlx_saved_vm="${VM:-}"
+    _envlx_saved_vm="${_envlx_saved_vm##*/}"
+    if [ -n "$_envlx_saved_profile" ]; then
+        clear_vm_scope
+        clear_profile_scope
+        if ! load_profile "$_envlx_saved_profile"; then
+            unset _envlx_saved_profile _envlx_saved_vm
+            return 1
+        fi
+        if [ -n "$_envlx_saved_vm" ]; then
+            if ! load_vm "$_envlx_saved_vm"; then
+                unset _envlx_saved_profile _envlx_saved_vm
+                return 1
+            fi
+        fi
     fi
-    if [ -n "${VM_SH:-}" ] && [ -f "$VM_SH" ]; then
-        # shellcheck disable=SC1090
-        source "$VM_SH"
-    fi
+    unset _envlx_saved_profile _envlx_saved_vm
     _envlx_print_current
     unset _envlx_profile_arg _envlx_vm_arg _envlx_reset _envlx_no_args
     return 0
 fi
 
 if [ "$_envlx_reset" -eq 1 ]; then
-    _envlx_unset_vm_scope
-    _envlx_unset_profile_scope
+    clear_vm_scope
+    clear_profile_scope
     info "Cleared profile + vm scope (globals preserved)."
     unset _envlx_profile_arg _envlx_vm_arg _envlx_reset _envlx_no_args
     return 0
@@ -555,8 +450,8 @@ fi
 # NB: callers may have `set -e` enabled; capture function return codes via
 # `if ...; then ... else _rc=$? fi` so errexit doesn't trip on non-zero returns.
 if [ -n "$_envlx_profile_arg" ]; then
-    _envlx_unset_vm_scope
-    _envlx_unset_profile_scope
+    clear_vm_scope
+    clear_profile_scope
     if _envlx_enter_profile "$_envlx_profile_arg"; then
         _envlx_rc=0
     else
@@ -570,8 +465,8 @@ if [ -n "$_envlx_profile_arg" ]; then
 fi
 
 if [ -n "$_envlx_vm_arg" ]; then
-    _envlx_unset_vm_scope
-    if _envlx_enter_vm "$_envlx_vm_arg"; then
+    clear_vm_scope
+    if load_vm "$_envlx_vm_arg"; then
         :
     else
         unset _envlx_profile_arg _envlx_vm_arg _envlx_reset _envlx_no_args _envlx_rc

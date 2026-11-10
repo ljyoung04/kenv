@@ -4,7 +4,7 @@
 
 # create-image.sh creates a minimal Debian Linux image suitable for syzkaller.
 
-set -eux
+set -eu
 
 # Create a minimal Debian distribution in a directory.
 PREINSTALL_PKGS=openssh-server,curl,tar,gcc,libc6-dev,time,strace,sudo,less,psmisc,selinux-utils,policycoreutils,checkpolicy,selinux-policy-default,firmware-atheros,debian-ports-archive-keyring
@@ -16,7 +16,7 @@ fi
 
 # Variables affected by options
 ARCH=$(uname -m)
-RELEASE=bullseye
+RELEASE=bookworm
 FEATURE=minimal
 SEEK=2047
 PERF=false
@@ -36,7 +36,6 @@ display_help() {
 
 while true; do
     if [ $# -eq 0 ];then
-	echo $#
 	break
     fi
     case "$1" in
@@ -45,18 +44,23 @@ while true; do
             exit 0
             ;;
         -a | --arch)
+	    [ $# -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
 	    ARCH=$2
             shift 2
             ;;
         -d | --distribution)
+	    [ $# -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
 	    RELEASE=$2
             shift 2
             ;;
         -f | --feature)
+	    [ $# -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
 	    FEATURE=$2
             shift 2
             ;;
         -s | --seek)
+	    [ $# -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
+	    [[ "$2" =~ ^[1-9][0-9]*$ ]] || { echo "Size must be a positive integer" >&2; exit 2; }
 	    SEEK=$(($2 - 1))
             shift 2
             ;;
@@ -68,10 +72,24 @@ while true; do
             echo "Error: Unknown option: $1" >&2
             exit 1
             ;;
-        *)  # No more options
-            break
+        *)
+            echo "Unexpected argument: $1" >&2
+            exit 2
             ;;
     esac
+done
+
+# Validate before invoking sudo or touching existing files. The image manager
+# uses a new directory; direct callers receive the same preservation guarantee.
+if [[ ! "$RELEASE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid distribution: $RELEASE" >&2
+    exit 2
+fi
+for output in "$RELEASE" "$RELEASE.img" "$RELEASE.id_rsa" "$RELEASE.id_rsa.pub"; do
+    if [ -e "$output" ] || [ -L "$output" ]; then
+        echo "Refusing to overwrite existing path: $output" >&2
+        exit 1
+    fi
 done
 
 # Handle cases where qemu and Debian use different arch names
@@ -128,8 +146,7 @@ if [ $FEATURE = "full" ]; then
 fi
 
 DIR=$RELEASE
-sudo rm -rf $DIR
-sudo mkdir -p $DIR
+sudo mkdir "$DIR"
 sudo chmod 0755 $DIR
 
 # 1. debootstrap stage

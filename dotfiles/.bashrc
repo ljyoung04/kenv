@@ -43,3 +43,5 @@ eval "$(zoxide init bash)"
 export EDITOR=nano
 
 [ -f ~/.bash_aliases ] && source ~/.bash_aliases
+envlx() { source /workspace/tools/env.sh "$@"; }
+connect() { /workspace/tools/connect.sh "$@"; }
