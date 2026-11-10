@@ -14,14 +14,14 @@ Organize all artifacts generated during work under `agent/`, except kernel image
 
 ## Models and Task Assignment
 
-| Task | Assigned role | Model ID |
-|---|---|---|
-| 1. Audit target selection, vulnerability discovery, static analysis, candidate falsification | `kernel_astra` | `gpt-6-astra` |
-| 2. Minimal reproducers, KASAN/KCSAN dynamic validation | `kernel_astra` | `gpt-6-astra` |
-| 3. Static exploitability triage, independent causality review | `kernel_astra` | `gpt-6-astra` |
-| 3. Exploit strategy, implementation, debugging, reliability measurement | `kernel_daybreakblue` | `gpt-daybreak-blue-latest` |
-| 4. Minimal patch generation, regression and variant validation | `kernel_astra` | `gpt-6-astra` |
-| 5. Review material preparation, technical cross-review | `kernel_astra` | `gpt-6-astra` |
+| Task | Model ID |
+|---|---|
+| 1. Audit target selection, vulnerability discovery, static analysis, candidate falsification | `gpt-6-astra` |
+| 2. Minimal reproducers, KASAN/KCSAN dynamic validation | `gpt-6-astra` |
+| 3. Static exploitability triage, independent causality review | `gpt-daybreak-blue-latest` |
+| 3. Exploit strategy, implementation, debugging, reliability measurement | `gpt-daybreak-blue-latest` |
+| 4. Minimal patch generation, regression and variant validation | `gpt-6-astra` |
+| 5. Review material preparation, technical cross-review | `gpt-daybreak-blue-latest` |
 
 Role definitions are in `.codex/agents/`. Reading a skill does not change the model. At the start of a research stage, the orchestrator assigns work to the corresponding role or exact model ID. If already running as the assigned model, proceed without unnecessary delegation. This model-specific research delegation is permitted. Research agents are not mandatory for ordinary repository maintenance.
 
