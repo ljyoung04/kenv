@@ -27,7 +27,7 @@
 |3|free2free(2024)|Double free, heap overlap|
 |4|Kuwu(2024)|msg_msg,pipe_buffer|
 |5|pew(2025)|UAF, Drity Pipe|
-|5|d3kheap2(2025)|Refcount, cross-cache|
+|6|d3kheap2(2025)|Refcount, cross-cache|
 
 통과 기준 : SLUB의 객체 재사용과 slab 페이지 재사용의 차이를 설명하고, heap reclaim 실패 원인을 디버깅할 수 있어야한다.
 
