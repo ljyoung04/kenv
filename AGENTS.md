@@ -1,91 +1,217 @@
-# AGENTS.md — kenv Working Rules
+# AGENTS.md — agent guide for `kenv`
 
-These rules apply throughout this repository. Apply only relevant rules to ordinary code and documentation work; for kernel research, read the stage-specific skills below. This file defines authorization, isolation, and model assignments; skills define procedures and artifact requirements. User instructions and higher-priority system instructions take precedence.
+These instructions apply to the entire repository. `kenv` is a QEMU/KVM
+Linux-kernel development environment with a profile (image) + VM (container)
+model. Profile and VM state live on disk; the agent-facing CLIs are strict and
+stateless.
 
-Organize all artifacts generated during work under `agent/`, except kernel images and sources, which belong under `kernels/`.
+## Agent invocation
 
-## Repository and Execution
+Agents and automation call the scripts in `tools/` directly. The scripts
+derive the repository path from their own location, so do **not** source
+`tools/env.sh` first and do not rely on inherited `PRJ`, `PROFILE`, or `VM`
+values. From outside this repository, use the absolute `/workspace/tools/...`
+path.
 
-- `tools/vm.sh`, `tools/kernel.sh`, and `tools/fs.sh` initialize their own paths. Do not source `env.sh` on every Bash invocation. Shell shortcuts such as `envlx`, `vm`, `kernel`, and `connect` are user conveniences; agents use explicit CLI commands.
-- For profile operations, pass `-p <profile>` before the subcommand; for VM operations, pass `-p <profile> -v <vm>`. Place `--` before SSH remote commands. Do not infer targets from previous commands, aliases, or inherited environments.
-- Key locations: `kernels/` for kernel sources and build outputs, `configs/` for configuration fragments, `images/` for guest filesystem images, `profiles/<p>/profile.sh` for configuration, and `profiles/<p>/vms/<v>/` for VM state. Configuration files are sourced as executable code; verify their provenance and contents.
-- Keep research code, PoCs, exploits, logs, patches, notes, and final review materials under `agent/<research-name>/`; create it if needed. `agent/` and the skill installation directory `.agents/` are different directories. Preserve originals in `user/`, `save/`, other tasks' artifacts, and reference PoCs. As under the existing rules, do not read or use `reports/` as evidence.
-- `tmp/AGENTS.md` and translations are reference copies of earlier rules. Current procedures are defined by this root file and `.agents/skills/`. Do not search for nonexistent `agents/*.md` files.
+Every profile-scoped command must pass `-p <profile>`. Every command targeting
+a VM must pass both `-p <profile>` and `-v <vm>` before the subcommand.
 
-## Models and Task Assignment
+```bash
+# Discovery (no profile/VM flags)
+/workspace/tools/vm.sh ls --json
+/workspace/tools/vm.sh ps --json
 
-| Task | Model ID |
-|---|---|
-| 1. Audit target selection, vulnerability discovery, static analysis, candidate falsification | `gpt-6-astra` |
-| 2. Minimal reproducers, KASAN/KCSAN dynamic validation | `gpt-6-astra` |
-| 3. Static exploitability triage, independent causality review | `gpt-daybreak-blue-latest` |
-| 3. Exploit strategy, implementation, debugging, reliability measurement | `gpt-daybreak-blue-latest` |
-| 4. Minimal patch generation, regression and variant validation | `gpt-6-astra` |
-| 5. Review material preparation, technical cross-review | `gpt-daybreak-blue-latest` |
+# Profile-scoped operations
+/workspace/tools/kernel.sh -p <p> --kctfconfig
+/workspace/tools/kernel.sh -p <p> --olddefconfig
+/workspace/tools/kernel.sh -p <p> --build -j 16
+/workspace/tools/kernel.sh -p <p> --clang
+/workspace/tools/vm.sh -p <p> run <task>_$(date +%s)
 
-Role definitions are in `.codex/agents/`. Reading a skill does not change the model. At the start of a research stage, the orchestrator assigns work to the corresponding role or exact model ID. If already running as the assigned model, proceed without unnecessary delegation. This model-specific research delegation is permitted. Research agents are not mandatory for ordinary repository maintenance.
-
-Check the execution tool's supported models and actual creation result. If the specified model is unavailable or selection is rejected, do not silently substitute another model. Preserve handoff materials, suspend only that stage, and request model activation or explicit instructions for a replacement. Record the requested model separately from the verified actual model; do not claim use of an unverified model. When a new model is needed, create a new worker instead of merely relabeling an existing one.
-
-Do not create duplicate workers with overlapping stages, targets, and decision criteria. For parallel workers, assign distinct ownership of candidates, files, and VMs; never modify the same VM or build output directory concurrently. Follow the skills below for detailed stage procedures and handoff criteria.
-
-## Boundaries That Always Apply
-
-1. Source inspection, builds, static analysis, documentation, and reviewed control scripts may run on the host. Run PoCs, exploits, binaries of unknown provenance, and reproduction workloads that load or alter the kernel only in task-owned local VMs or separately authorized official services. Development containers share the host kernel and do not count as guest isolation.
-2. Do not modify the host kernel, modules, sysctl settings, firewall, mounts, block devices, or services; reboot, shut down, or exhaust host resources. Use `tracer.sh` only in guests. Research agents must not run `fs.sh create` or `create-image.sh` on the host because they perform mounts. Use prepared images; report when an image needs to be prepared.
-3. Name VMs `<task>_<unix-timestamp>`, where `<task>` matches `[a-z0-9][a-z0-9-]*` and the timestamp is decimal Unix time in seconds. Check for collisions, including stopped VM directories, before creation; use a later timestamp if a collision occurs. `a`, `vm`, `vm1`, `test`, and `debug` are reserved for the user.
-4. Record each created VM's profile, name, path, creation time, and owning task. Do not infer ownership from its name alone. Do not stop, delete, or reset another task's or user's VM without explicit delegation.
-5. Transfer research files only with `tools/vm.sh ... scp`, marking guest paths with `vm:`. Do not substitute host sharing through `--shared`, 9p, virtiofs, `vmhttp`, or similar mechanisms.
-6. Before running commands, patches, or tests, verify the exact target, arguments, side effects, and isolation. Record suspected test infrastructure or QEMU issues separately from kernel vulnerabilities; do not expand research into attacks on the host or isolation boundary.
-7. Outputs from models, scanners, and previous agents are hypotheses until verified. Check paths, symbols, line numbers, configurations, diagnostics, and results against current source and evidence. Do not fabricate unsupported results.
-8. Read-only access to public rules, patches, and sources is allowed. Consuming official attempts, uploading, submitting flags or forms, contacting third parties, and external reporting or disclosure require user instructions specifying the action and destination. Do not request authorization already granted. The presence of `connect.sh` or certificates does not authorize service use. Internal reports and `FINDINGS.md` require no separate authorization.
-
-## Research Stages and Skills
-
-At the start of research, identify which of the five stages the request covers. If multiple stages are authorized, proceed in order; do not interpret a discovery request as authorization for exploit development or external submission.
-
-1. Vulnerability discovery: select audit targets, find static candidates, and attempt to falsify them.
-2. Dynamic validation: produce minimal reproducers and KASAN/KCSAN evidence in isolated VMs.
-3. Exploitability assessment: evaluate target impacts such as information disclosure, flag reads, and privilege escalation under the actual target's mitigations and privilege conditions.
-4. Patch generation: create minimal root-cause fixes and validate regressions and variants.
-5. Human review: have humans review the root cause, reproducer, exploit, patch, severity, and limitations.
-
-| When applicable | Skill to read |
-|---|---|
-| Discovery, source audits, static triage, falsification, preliminary KernelCTF eligibility checks | [vuln-discovery](.agents/skills/vuln-discovery/SKILL.md) |
-| Reproducers, KASAN/KCSAN, dynamic confirmation, crash causality validation | [dynamic-validation](.agents/skills/dynamic-validation/SKILL.md) |
-| Exploitability triage, exploit development, target impact, success-rate measurement | [exploitdev](.agents/skills/exploitdev/SKILL.md) |
-| Minimal patches, builds, regression, variant, and bypass validation | [patch-generation](.agents/skills/patch-generation/SKILL.md) |
-| Human review evidence bundles, technical cross-review, final handoff | [human-report](.agents/skills/human-report/SKILL.md) |
-| Authorized KernelCTF information queries and remote tests | [kctf-official-helper](.agents/skills/kctf-official-helper/SKILL.md) |
-
-Read only applicable skills. Candidates pass through record completeness → static falsification/reproduction preparation → dynamic validation. Distinguish `SOURCE_CONFIRMED` from `DYNAMIC_CONFIRMED`; record reachability and exploitability as separate dimensions. Do not claim target impact from a crash or KASAN output alone. KernelCTF success need not require a root shell or conventional LPE: satisfying the current service's flag acquisition and success contract on the official target with the prescribed starting privileges can meet the goal. Verify exact flag paths, formats, and success criteria against official rules and the evaluation system at the time of work; do not infer them from past targets.
-
-Before handoff or completion, record confirmed facts, useful primitives, important negative results, unresolved issues, and evidence paths and hashes in `agent/<research-name>/FINDINGS.md`. Do not overwrite other tasks' records. Verify the connection between root cause and outcome; do not count success from another vulnerability or relaxed experimental settings as success against the designated target.
-
-## Orchestration and Stage Handoffs
-
-Within the authorized scope, the orchestrator follows this order:
-
-```text
-vuln-discovery
-  -> dynamic-validation
-  -> exploitdev
-  -> patch-generation
-  -> human-report
+# VM-scoped operations
+/workspace/tools/vm.sh -p <p> -v <v> ssh -- uname -r
+/workspace/tools/vm.sh -p <p> -v <v> scp ./test.c vm:/root/test.c
+/workspace/tools/vm.sh -p <p> -v <v> gdb
+/workspace/tools/vm.sh -p <p> -v <v> attach
+/workspace/tools/vm.sh -p <p> -v <v> log
+/workspace/tools/vm.sh -p <p> -v <v> kill
+/workspace/tools/vm.sh -p <p> -v <v> rm
 ```
 
-At the end of each stage, the assigned worker records its verdict and original evidence paths and stops. The orchestrator directly checks the handoff files, then passes `research-name`, Candidate-ID, Target-ID, exact revision and configuration, the previous verdict, evidence paths and hashes, unverified assumptions, and stopping conditions to the next stage. Do not pass only a conversation summary or leave the next worker to guess the previous worker's directory.
+The `--` before an SSH remote command is required. For SCP, mark the remote
+side as `vm:/path`; prefix ambiguous local paths with `./`.
 
-Do not automatically advance candidates that fail the following gates.
+`tools/env.sh` and its `envlx`, `vm`, and `kernel` functions are interactive
+user conveniences only. Do not use their remembered shell context in agent
+work. In particular, examples such as `vm run a` in `commands.txt` are the
+human flow; use the explicit commands above instead.
 
-| Handoff | Minimum gate |
-|---|---|
-| Discovery → validation | Entry path, violated invariant, and attacker control are documented in current source, and static falsification has been performed. |
-| Validation → exploitability | `DYNAMIC_CONFIRMED`, with reproduction evidence linking the observed defect to the designated root cause. |
-| Exploitability → patch | A verdict on the primitive or target impact exists; successful results have an independent causality review confirming use of the designated vulnerability. Dynamically confirmed vulnerabilities may be patched even when exploitation fails. |
-| Patch → human review | The patch builds, and reproducer regression, functional regression, variant review, and remaining risks are documented. |
+## Profiles and builds
 
-Failure of one candidate does not block others. Preserve terminal states such as `REJECTED`, `NOT_REPRODUCED`, `INFRA_BLOCKED`, and `NEEDS_CONTEXT` with evidence. If the next stage is outside user authorization, prepare the handoff only; do not execute it. Remote evaluation, flag submission, external reporting, and disclosure are not automatic pipeline stages.
+Profiles live at `profiles/<p>/profile.sh` and are sourced as trusted shell
+configuration. They require `ARCH`, `LLVM`, `FS`, and either:
 
-For KernelCTF, recheck the [official rules](https://github.com/google/security-research/blob/master/kernelctf/rules.md) at the start of work and final handoff. Do not assume fixed historical targets, LTS versions, or submission windows. Separately record 0-day/disclosure/patch status, duplicates, actual active targets and configurations, unprivileged reachability, LTS triggers, runtime and stability, and packaging requirements. Read `kctf-official-helper` additionally only when needed for these checks or authorized testing.
+- `KSRC` + `KOBJ` for a source/build profile; or
+- `KIMAGE` for a prebuilt-kernel profile (optionally `KSRC` for GDB mapping).
+
+`kernel.sh` build/config commands requiring source do not work with a
+`KIMAGE`-only profile. A missing profile is not created by the stateless CLI.
+For interactive setup, `source tools/env.sh --profile <p>` creates a template;
+for automation, create and review `profiles/<p>/profile.sh` explicitly.
+
+Image discovery and creation use:
+
+```bash
+/workspace/tools/fs.sh ls
+/workspace/tools/fs.sh create <name> -a x86_64 -s 5120
+```
+
+Image creation uses sudo/debootstrap and mounts a disk image. Do not run it as
+an incidental research step; use an existing image unless image creation is
+part of the request.
+
+## VM behavior
+
+Name every agent-created VM `<task>_<unix-timestamp>`, with a descriptive task
+made from letters, digits, `_`, or `-`. If a stopped directory already has that
+name, use a new timestamp. Generic names such as `a`, `vm`, `vm1`, `test`, and
+`debug` belong to users; never create, stop, remove, or reuse them.
+
+`run` refuses to overwrite an existing VM directory. `kill` stops QEMU but
+keeps logs and metadata. `rm` deletes a stopped VM directory and refuses a live
+VM. Do not operate on a VM that this task did not create unless the user
+explicitly identifies it as the target.
+
+For `vm.sh ssh`, interpret exit status together with stderr diagnostics:
+
+| rc | Meaning |
+|---:|---|
+| 0 | Connection and remote command succeeded |
+| 251 | SSH unavailable (booting, network, sshd, hang, kdb, and so on) |
+| 252 | `boot.log` contains panic/oops/BUG/GPF evidence |
+| 1–254 | May be the remote command's own nonzero status |
+
+A remote command can itself return 251 or 252, so do not classify the result
+without the diagnostic message and `boot.log` evidence.
+
+## Repository layout and state
+
+```text
+/workspace/
+├── tools/                         CLI scripts and shell helpers
+├── configs/                       kernel configs and `.clangd`
+├── kernels/                       kernel sources and build artifacts
+├── images/<name>/                 guest image and SSH keys
+├── profiles/<p>/
+│   ├── profile.sh                 static profile configuration
+│   └── vms/<v>/
+│       ├── vm.sh                  boot-time VM metadata
+│       ├── vm.pid                 QEMU PID
+│       └── boot.log               serial console log
+├── agent/                         agent-generated research artifacts
+├── user/                          user-owned material; preserve it
+├── save/                          saved material; preserve it
+├── commands.txt                   user and automation command recipes
+└── README.md                      user-facing documentation
+```
+
+The current checkout may have no registered profiles. Discover them with
+`/workspace/tools/vm.sh ls --json`; never guess a profile or VM from a previous
+shell session.
+`vm.pid` is checked against the matching QEMU command line rather than trusted
+as an arbitrary live PID.
+
+Keep task-generated PoCs, logs, patches, and notes under a dedicated
+`agent/<task>/` directory. Kernel sources and build products stay under
+`kernels/`. Preserve unrelated changes and all existing content under `user/`,
+`save/`, and other tasks' artifact directories.
+
+## Safety and legacy paths
+
+- Run untrusted binaries, kernel PoCs, exploits, module-loading tests, and
+  kernel-altering workloads only inside a task-owned VM, not on the host or in
+  the development container (which shares the host kernel).
+- Do not modify host kernel settings, modules, mounts, networking, services, or
+  block devices unless the user explicitly requests that host-side action.
+- Transfer research inputs with `vm.sh ... scp`. Use `--shared` only when the
+  user has asked for a shared host directory.
+- `envsetup.sh`, `run-vm.sh`, `ssh.sh`, and `scp.sh` are removed legacy entry
+  points. Do not recreate or invoke them.
+- Treat profile files as executable shell code and inspect untrusted profile
+  content before sourcing it.
+
+## Kernel research workflow
+
+Vulnerability research runs as separate stages. Each stage has its own skill
+in `.agents/skills/` (linked as `.claude/skills/` for Claude Code). Load only
+the skill for the current stage.
+
+| Stage | Skill | Gate to the next stage |
+|---|---|---|
+| Static audit and falsification | `vuln-discovery` | Revision, config, entry path, violated invariant, and falsification are recorded |
+| Runtime confirmation in a task-owned VM | `dynamic-validation` | `DYNAMIC_CONFIRMED`, linked to the designated root cause |
+| Root-cause fix and regression | `patch-generation` | Patch builds; reproducer, functional, and variant checks are recorded |
+| Evidence cross-check and review bundle | `human-report` | — |
+| Official kernelCTF service actions | `kctf-official-helper` | Needs explicit approval for each action |
+
+- Run only the stages the user requested, in order. Finish and record each
+  stage's gate before starting the next one.
+- Source review alone does not authorize running code in a guest. Local
+  validation does not authorize using the official service. A patch does
+  not authorize submission or disclosure.
+- Treat scanner, model, and earlier-agent output as hypotheses. Never raise a
+  verdict above its evidence. Keep negative verdicts (`REJECTED`,
+  `NOT_REPRODUCED`, `INFRA_BLOCKED`, `NEEDS_CONTEXT`) with their evidence.
+- Each stage updates `agent/<research-name>/FINDINGS.md` with facts,
+  verdicts, evidence paths, and SHA-256. A handoff carries Candidate-ID,
+  Target-ID, exact revision and config, verdict, evidence, and open
+  assumptions, not just a summary of the conversation.
+- `user/tmp/` holds the earlier Codex-oriented copies of these rules for
+  reference only.
+
+## kernelCTF official tooling (`tools/kctf.sh`)
+
+The official kernelCTF repo is checked out, user-owned and unmodified, under
+`user/kctf/security-research/kernelctf/` (client, simulator, config checker,
+submission checker, rules, style guide) and `user/kctf/kernel-research/`
+(image_runner, kxdb_tool, rop_generator, libxdk). Do not edit anything under
+`user/`. Drive these tools only through the wrapper `tools/kctf.sh`, which
+derives paths from its own location (override with `KCTF_DIR=`).
+
+```bash
+tools/kctf.sh paths                       # resolved paths + dependency/kvm check
+tools/kctf.sh rules | style | faq         # print local rules.md / style_guide.md / faq.md
+tools/kctf.sh check-config <target.config> user/kctf/security-research/kernelctf/kernel_configs/<target>.config
+tools/kctf.sh sim <release-name> [--root] # boot a release in a LOCAL VM (no official server)
+tools/kctf.sh repro-summary <repro.log>
+tools/kctf.sh verify <exploit_path...>    # local build+verify on upstream/stable
+tools/kctf.sh info                        # read-only query of active targets (contacts official server)
+tools/kctf.sh lpe-test  <exploit> [--local] [cli args...]
+tools/kctf.sh vuln-test <exploit> [--local] [cli args...]
+tools/kctf.sh evaluate  <exploit> --researcher-token <T> [cli args...]
+```
+
+Required-config fragments live in
+`user/kctf/security-research/kernelctf/kernel_configs/` (`hardened-v1.config`,
+`lts-6.12-v2.config`, ...); pass the one matching the target as the second
+`check-config` argument.
+
+Safety gate (matches the `kctf-official-helper` skill and "Safety and legacy
+paths" above): `lpe-test`/`vuln-test`/`evaluate` run an exploit on the OFFICIAL
+Google service and are **refused** unless the operator opts in with
+`KCTF_CONFIRM_OFFICIAL=1` (or passes `--local` to target a local server/VM).
+The gate is a backstop only: an agent must still obtain the user's explicit,
+per-attempt approval before any official-service action, exactly as the
+`kctf-official-helper` stage requires. Local/offline subcommands
+(`check-config`, `check-submission`, `repro-summary`, `sim`, `verify`, docs,
+`paths`) run without the gate.
+
+## Response format
+
+Write repository paths in backticks. For a location with a line number, keep
+the path and line together inside the backticks, for example
+`tools/vm.sh:120`.
+
+For additional usage details, consult `commands.txt`, `README.md`, and each
+CLI's `--help` output. Prefer the explicit automation recipes in
+`commands.txt` over the interactive shell-helper examples.

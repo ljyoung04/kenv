@@ -8,6 +8,10 @@
 # user & agent: keep dir, ignore everything inside
 /user/*
 !/user/.gitkeep
+!/user/kctf/
+/user/kctf/*
+!/user/kctf/.gitkeep
+
 /agent/*
 !/agent/.gitkeep
 
