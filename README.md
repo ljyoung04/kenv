@@ -178,6 +178,7 @@ connect hostname:port           # 접속 대상 지정
 | `tools/repo-apply.py` | AOSP `repo diff` 적용·dry run |
 | `tools/tracer.sh` | 게스트에서 source하는 ftrace 도우미 |
 | `tools/gdb/race_debug.gdb` | GDB 디버깅 명령 모음 |
+| `tools/kctf.sh` | KernelCTF 공식 툴의 레퍼. 반드시 user/kctf/경로에 구글의 serucity-research 레포지토리가 있어야한다. |
 
 중복된 `envsetup.sh`, `run-vm.sh`, `ssh.sh`, `scp.sh`는 제거했습니다.
 
