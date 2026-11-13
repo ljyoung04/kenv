@@ -36,6 +36,15 @@ the missing static evidence first. If the source or config needed is not
 available, mark the candidate `NEEDS_CONTEXT`. Do not keep re-running a
 candidate that was clearly falsified unless new evidence appears.
 
+Records in `agent/`, from this research or an earlier one, are inputs to
+check, not facts. Before spending VM time, confirm that the record's
+revision and config match the kernel you will build, re-hash its evidence,
+and spot-check its cited `path:line` against the pinned source. A record
+that fails any of these checks is treated like a `HYPOTHESIS`: close the
+static gap first. An earlier `NOT_REPRODUCED` or `REJECTED` closes a
+candidate only after you have checked its stated reason, such as budget, a
+missing diagnostic, wrong privileges, or a wrong build.
+
 Before running anything, set and record a per-candidate budget: wall time,
 attempt count, guest CPU/memory, and a no-progress stopping rule. Do not
 try to win long races or refcount wraparounds by exhausting host resources.

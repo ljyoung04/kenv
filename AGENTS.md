@@ -143,7 +143,7 @@ Keep task-generated PoCs, logs, patches, and notes under a dedicated
 ## Kernel research workflow
 
 Vulnerability research runs as separate stages. Each stage has its own skill
-in `.agents/skills/` (linked as `.claude/skills/` for Claude Code). Load only
+in `.claude/skills/`. Load only
 the skill for the current stage.
 
 | Stage | Skill | Gate to the next stage |

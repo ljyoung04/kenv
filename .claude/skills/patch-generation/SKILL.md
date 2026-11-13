@@ -17,6 +17,10 @@ conventions.
 - Required inputs: exact vulnerable revision and config, `DYNAMIC_CONFIRMED`
   evidence, the minimal reproducer, and the violated invariant. If any are
   missing, return `RETURN_TO_ANALYSIS`.
+- Check inherited evidence instead of trusting its summary. Re-hash the
+  logs, read the sanitizer report yourself, and confirm that it matches the
+  candidate's first invalid operation, as `validation.md` claims. On a
+  mismatch, return `RETURN_TO_ANALYSIS`.
 - Editing, static checks, and builds may run on the host. Reproducers and
   regression workloads run only in task-owned VMs.
 - **Do not edit the shared source tree in place.** Use a `git worktree` or a
