@@ -15,8 +15,8 @@ explicit verdict with its limits.
 - Read root `AGENTS.md`, `scope.md`, and the candidate records first.
 - Run this stage only when the user asked for runtime validation. A
   discovery-only request does not authorize running reproducers.
-- Write and minimize reproducers that **trigger and observe** the defect.
-  Do not extend them toward privilege escalation or other weaponization.
+- Write and minimize reproducers that **trigger and observe** the defect,
+  and nothing more.
 - Write artifacts to `agent/<research-name>/validation/<candidate-id>/`. Keep
   the original Candidate-ID and Target-ID. Do not edit discovery records.
 - Work candidates one at a time by default. With subagents (only if the user
@@ -170,13 +170,14 @@ When a crash occurs, save the original evidence before running again.
 
 If minimizing loses the reproduction, keep the last version that reproduced.
 
-## 5. Impact class (static, no exploitation)
+## 5. Impact class (evidence only)
 
 For each confirmed defect, record a short, evidence-bound classification to
-order patch work. Do not build or attempt an exploit.
+order patch work.
 
-- Observed primitive (for example "UAF write of 8 bytes at offset 160 in
-  kmalloc-192", "8 bytes of uninitialized stack copied to user")
+- Observed effect, as the diagnostic reports it (for example "UAF write of
+  8 bytes at offset 160 in kmalloc-192", "8 bytes of uninitialized stack
+  copied to user")
 - Class: memory corruption / info leak / DoS-only / logic or permission bypass
 - Reachability actually demonstrated (privileges, namespaces)
 - Anything beyond that is `UNVERIFIED`

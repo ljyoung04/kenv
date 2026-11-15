@@ -5,6 +5,10 @@
 # images: keep dir skeletons, ignore contents
 /images/*
 
+#profiles keep dir, ignore contents
+/profiles/*
+!/profiles/.gitkeep
+
 # user & agent: keep dir, ignore everything inside
 /user/*
 !/user/.gitkeep

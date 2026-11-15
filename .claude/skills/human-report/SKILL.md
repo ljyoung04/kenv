@@ -48,7 +48,7 @@ Do not hide a missing link. Verify independently that:
   are preserved.
 - The patch fixes the root cause and its variants without regressions, and
   does not merely block the reproducer.
-- Severity statements stay within the demonstrated primitive and
+- Severity statements stay within the demonstrated effect and
   reachability.
 
 Do not change originals to resolve a discrepancy. Record its impact and the
@@ -75,12 +75,12 @@ patch/
 
 - `vulnerability.md`: summary, affected revisions and configs, threat model,
   entry path, root cause, invariant, first invalid operation, runtime
-  evidence, demonstrated primitive. Use the writing style of
+  evidence, demonstrated effect. Use the writing style of
   `references/example1.md` and `references/example2.md`: a precise
   interleaving or call chain, the exact object and offset, and why
-  sanitizers do or do not catch it. Those examples also contain material
-  outside this workflow (exploit timelines, flag captures); do not copy
-  that part of their structure.
+  sanitizers do or do not catch it. The disclosure timeline in
+  `example1.md` is outside this workflow; do not copy that part of its
+  structure.
 - `reproduction.md`: setup commands kept separate from attacker actions,
   expected output, failure diagnosis, successes out of total.
 - `patch.md`: design, base revision, apply/build/regression/variant results,
@@ -90,7 +90,7 @@ patch/
 
 Every important claim must trace through `evidence/index.md` to an original
 file, hash, and location. Do not copy kernel images, `vmlinux`,
-certificates, tokens, flags, or personal data into the bundle.
+certificates, tokens, other secrets, or personal data into the bundle.
 
 ## KernelCTF review mode
 
@@ -111,7 +111,7 @@ Mark freshness, duplicate status, target inclusion, unprivileged
 reachability, LTS reproduction, stability, disclosure and patch timing, and
 evidence availability as `PASS`, `FAIL`, `UNKNOWN`, or `OUT_OF_SCOPE`, with
 lookup time and URLs. Requirements beyond discovery, minimal reproduction,
-patching, and review (for example a full exploit) are `OUT_OF_SCOPE`. Do not
+patching, and review are `OUT_OF_SCOPE`; the user handles them. Do not
 create placeholder artifacts for them or claim submission readiness.
 
 ## Final verdict
@@ -132,8 +132,8 @@ and commands read-only from a clean directory, to catch hidden state.
 ## Background
 
 Keeps the human-review bundle from OpenAI's
-[A thousand fewer paths to root](https://openai.com/index/a-thousand-fewer-paths-to-root/)
-(root-cause analysis, minimal crashing PoC, candidate patch, all reviewed
-by humans before reporting) and leaves out its exploit-development stage.
+[A thousand fewer paths to root](https://openai.com/index/a-thousand-fewer-paths-to-root/):
+root-cause analysis, minimal crashing PoC, and candidate patch, all reviewed
+by humans before reporting.
 A verdict here does not replace human judgment or a program's eligibility
 decision.

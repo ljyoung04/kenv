@@ -381,7 +381,7 @@ Mechanism: <lifetime/race: the interleaving; bounds/integer: the value flow and 
 First invalid operation: <function, path:line, read/write, object and field>
 Source evidence: <path:line, symbols, branches>
 Decisive question: <the fact that settles the verdict; answer; evidence>
-Primitive: <what the defect statically gives, e.g. UAF write of N bytes in kmalloc-192>
+Effect: <what the defect statically causes, e.g. UAF write of N bytes in kmalloc-192>
 Impact hypothesis: <consequence needing runtime or human confirmation>
 Falsification: <defenses checked, attempts, results>
 Counterevidence/unknowns: <adverse evidence, unverified points>
@@ -410,7 +410,7 @@ Before handing off, check that:
 - Files, symbols, line numbers, config options, and call paths match the
   pinned revision. Run the Gate B citation check on every analysis and
   re-verification file.
-- No step is missing between the root cause and the claimed primitive. A
+- No step is missing between the root cause and the claimed effect. A
   lifetime candidate needs its relation row and a permitted interleaving,
   and a bounds candidate needs a value flow and a concrete passing value.
   Without them, the candidate stays `HYPOTHESIS`.

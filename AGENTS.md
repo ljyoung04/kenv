@@ -128,7 +128,7 @@ Keep task-generated PoCs, logs, patches, and notes under a dedicated
 
 ## Safety and legacy paths
 
-- Run untrusted binaries, kernel PoCs, exploits, module-loading tests, and
+- Run untrusted binaries, kernel reproducers (PoCs), module-loading tests, and
   kernel-altering workloads only inside a task-owned VM, not on the host or in
   the development container (which shares the host kernel).
 - Do not modify host kernel settings, modules, mounts, networking, services, or
@@ -150,19 +150,17 @@ the skill for the current stage.
 |---|---|---|
 | Static audit and falsification | `vuln-discovery` | Revision, config, entry path, violated invariant, and falsification are recorded |
 | Runtime confirmation in a task-owned VM | `dynamic-validation` | `DYNAMIC_CONFIRMED`, linked to the designated root cause |
-| Exploitability assessment and exploit development | `exploit-development` | `EXPLOIT_CONFIRMED`: reliable primitive/LPE on a task-owned VM or local kernelCTF target, KASLR handled, reliability recorded |
 | Root-cause fix and regression | `patch-generation` | Patch builds; reproducer, functional, and variant checks are recorded |
 | Evidence cross-check and review bundle | `human-report` | — |
 | Official kernelCTF service actions | `kctf-official-helper` | Needs explicit approval for each action |
 
+- Agent work ends at root cause, minimal reproducer, patch, and review
+  bundle. Exploit development is out of scope for agents; the user handles it.
 - Run only the stages the user requested, in order. Finish and record each
   stage's gate before starting the next one.
-- Source review alone does not authorize running code in a guest. Runtime
-  confirmation does not authorize exploit development. Local validation or a
-  working local exploit does not authorize using the official service. A patch
-  does not authorize submission or disclosure. `exploit-development` builds and
-  runs exploits only on a task-owned VM or a local kernelCTF target
-  (`tools/kctf.sh sim`, `image_runner`), never against the official service.
+- Source review alone does not authorize running code in a guest. Local
+  validation does not authorize using the official service. A patch does not
+  authorize submission or disclosure.
 - Treat scanner, model, and earlier-agent output as hypotheses. Never raise a
   verdict above its evidence. Keep negative verdicts (`REJECTED`,
   `NOT_REPRODUCED`, `INFRA_BLOCKED`, `NEEDS_CONTEXT`) with their evidence.
@@ -177,19 +175,13 @@ the skill for the current stage.
 
 The official kernelCTF repo is checked out, user-owned and unmodified, under
 `user/kctf/security-research/kernelctf/` (client, simulator, config checker,
-submission checker, rules, style guide) and `user/kctf/kernel-research/`
-(image_runner, kxdb_tool, rop_generator, libxdk). Do not edit anything under
-`user/`. Drive the official client, simulator, config checker, submission
-checker, and local verify through the wrapper `tools/kctf.sh`, which derives
-paths from its own location (override with `KCTF_DIR=`) and enforces the
-official-service gate.
+rules, style guide). Do not edit anything under `user/`. Drive the official
+client, simulator, and config checker through the wrapper `tools/kctf.sh`,
+which derives paths from its own location (override with `KCTF_DIR=`) and
+enforces the official-service gate.
 
-The `kernel-research` exploitation building blocks (`libxdk`, `kxdb_tool`,
-`rop_generator`, `image_runner`) are not wrapped by `tools/kctf.sh`. The
-`exploit-development` stage uses them by copying the needed source into
-`agent/<research-name>/exploit/` and building/running it there, so `user/` is
-never modified. They are offline/local tools and must never be pointed at the
-official service.
+Agents use only the subcommands below. The wrapper's other subcommands and
+the tooling under `user/kctf/kernel-research/` are reserved for the user.
 
 ```bash
 tools/kctf.sh paths                       # resolved paths + dependency/kvm check
@@ -197,11 +189,8 @@ tools/kctf.sh rules | style | faq         # print local rules.md / style_guide.m
 tools/kctf.sh check-config <target.config> user/kctf/security-research/kernelctf/kernel_configs/<target>.config
 tools/kctf.sh sim <release-name> [--root] # boot a release in a LOCAL VM (no official server)
 tools/kctf.sh repro-summary <repro.log>
-tools/kctf.sh verify <exploit_path...>    # local build+verify on upstream/stable
 tools/kctf.sh info                        # read-only query of active targets (contacts official server)
-tools/kctf.sh lpe-test  <exploit> [--local] [cli args...]
-tools/kctf.sh vuln-test <exploit> [--local] [cli args...]
-tools/kctf.sh evaluate  <exploit> --researcher-token <T> [cli args...]
+tools/kctf.sh vuln-test <reproducer> [--local] [cli args...]  # LTS crash-trigger test (official unless --local)
 ```
 
 Required-config fragments live in
@@ -210,14 +199,13 @@ Required-config fragments live in
 `check-config` argument.
 
 Safety gate (matches the `kctf-official-helper` skill and "Safety and legacy
-paths" above): `lpe-test`/`vuln-test`/`evaluate` run an exploit on the OFFICIAL
-Google service and are **refused** unless the operator opts in with
+paths" above): `vuln-test` runs the uploaded reproducer on the OFFICIAL Google
+service and is **refused** unless the operator opts in with
 `KCTF_CONFIRM_OFFICIAL=1` (or passes `--local` to target a local server/VM).
 The gate is a backstop only: an agent must still obtain the user's explicit,
 per-attempt approval before any official-service action, exactly as the
-`kctf-official-helper` stage requires. Local/offline subcommands
-(`check-config`, `check-submission`, `repro-summary`, `sim`, `verify`, docs,
-`paths`) run without the gate.
+`kctf-official-helper` stage requires. The local/offline subcommands
+(`check-config`, `repro-summary`, `sim`, docs, `paths`) run without the gate.
 
 ## Response format
 

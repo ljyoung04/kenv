@@ -104,7 +104,7 @@ bug.
 
 ## Relationship to CVE-2026-43074
 
-This bug is distinct from CVE-2026-43074 (exploited in exp510,
+This bug is distinct from CVE-2026-43074 (kernelCTF
 [PR #380](https://github.com/google/security-research/pull/380)), though both
 were introduced by the same [commit 58c9b016e128](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=58c9b016e12855286370dfb704c08498edbc857a). The CVE-2026-43074 fix
 ([commit 07712db8](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=07712db80857d5d09ae08f3df85a708ecfc3b61f),
@@ -113,14 +113,11 @@ this bug's race window runs with a spinlock held, the `struct eventpoll`
 is no longer freed during the window, so the eventpoll UAF disappears.
 The `struct file` UAF and the underlying root cause remained until
 [this bug's own fix](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=a6dc643c69311677c574a0f17a3f4d66a5f3744b).
-Our exploit was finished before the CVE-2026-43074 patch and therefore uses the
-eventpoll UAF.
 
 ## Timeline
 
 | Date | Event |
 |------|-------|
-| 2026-02-11 | We captured flags on lts-6.12.67 and cos-121-18867.294.100 |
 | 2026-02-17 | We reported the bug to security@kernel.org |
 | 2026-02-17 | Maintainers proposed a patch prototype, but it was not a correct fix and the discussion then stalled |
 | 2026-04-02 | CVE-2026-43074 fix (`07712db8`) landed in mainline, making `struct eventpoll` RCU-freed |

@@ -31,7 +31,7 @@ dereferences the freed leader in `perf_read_group()`.
 
 ## Reaching the bug as an unprivileged user
 
-The exploited path needs only `perf_event_open(2)` and `execve(2)` on task-bound
+The vulnerable path needs only `perf_event_open(2)` and `execve(2)` on task-bound
 software events, so it involves no capability and no namespace.
 
 ```
@@ -118,7 +118,7 @@ The bug became reachable by an unprivileged user only when
 - [commit 037a3c43edfb ("perf/core: Detach event groups during remove_on_exec")](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=037a3c43edfb597665dd34457cd22b14692f2ba3)
   (v7.2-rc2) upstream
 - [commit 39358e856fb8](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/commit/?id=39358e856fb89e62e3c8d7389a2dc4ec33dbe90e)
-  (v6.12.96) in the 6.12 stable tree, the target of this submission
+  (v6.12.96) in the 6.12 stable tree, the target of this report
 
 ## Commit which fixed the vulnerability
 
@@ -131,7 +131,7 @@ The fix resets `group_leader` to the event itself when a sibling is detached.
 
 The patch description covers the CPU hotplug and `perf_ioctl()` variant, but
 the same flaw is also reachable from an unprivileged task through
-`remove_on_exec`, which is the path this submission exploits.
+`remove_on_exec`, which is the path this report covers.
 
 ## Affected kernel versions
 
