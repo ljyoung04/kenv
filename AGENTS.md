@@ -150,15 +150,19 @@ the skill for the current stage.
 |---|---|---|
 | Static audit and falsification | `vuln-discovery` | Revision, config, entry path, violated invariant, and falsification are recorded |
 | Runtime confirmation in a task-owned VM | `dynamic-validation` | `DYNAMIC_CONFIRMED`, linked to the designated root cause |
+| Exploitability assessment and exploit development | `exploit-development` | `EXPLOIT_CONFIRMED`: reliable primitive/LPE on a task-owned VM or local kernelCTF target, KASLR handled, reliability recorded |
 | Root-cause fix and regression | `patch-generation` | Patch builds; reproducer, functional, and variant checks are recorded |
 | Evidence cross-check and review bundle | `human-report` | — |
 | Official kernelCTF service actions | `kctf-official-helper` | Needs explicit approval for each action |
 
 - Run only the stages the user requested, in order. Finish and record each
   stage's gate before starting the next one.
-- Source review alone does not authorize running code in a guest. Local
-  validation does not authorize using the official service. A patch does
-  not authorize submission or disclosure.
+- Source review alone does not authorize running code in a guest. Runtime
+  confirmation does not authorize exploit development. Local validation or a
+  working local exploit does not authorize using the official service. A patch
+  does not authorize submission or disclosure. `exploit-development` builds and
+  runs exploits only on a task-owned VM or a local kernelCTF target
+  (`tools/kctf.sh sim`, `image_runner`), never against the official service.
 - Treat scanner, model, and earlier-agent output as hypotheses. Never raise a
   verdict above its evidence. Keep negative verdicts (`REJECTED`,
   `NOT_REPRODUCED`, `INFRA_BLOCKED`, `NEEDS_CONTEXT`) with their evidence.
@@ -175,8 +179,17 @@ The official kernelCTF repo is checked out, user-owned and unmodified, under
 `user/kctf/security-research/kernelctf/` (client, simulator, config checker,
 submission checker, rules, style guide) and `user/kctf/kernel-research/`
 (image_runner, kxdb_tool, rop_generator, libxdk). Do not edit anything under
-`user/`. Drive these tools only through the wrapper `tools/kctf.sh`, which
-derives paths from its own location (override with `KCTF_DIR=`).
+`user/`. Drive the official client, simulator, config checker, submission
+checker, and local verify through the wrapper `tools/kctf.sh`, which derives
+paths from its own location (override with `KCTF_DIR=`) and enforces the
+official-service gate.
+
+The `kernel-research` exploitation building blocks (`libxdk`, `kxdb_tool`,
+`rop_generator`, `image_runner`) are not wrapped by `tools/kctf.sh`. The
+`exploit-development` stage uses them by copying the needed source into
+`agent/<research-name>/exploit/` and building/running it there, so `user/` is
+never modified. They are offline/local tools and must never be pointed at the
+official service.
 
 ```bash
 tools/kctf.sh paths                       # resolved paths + dependency/kvm check
