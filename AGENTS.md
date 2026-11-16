@@ -109,6 +109,7 @@ without the diagnostic message and `boot.log` evidence.
 │       ├── vm.pid                 QEMU PID
 │       └── boot.log               serial console log
 ├── agent/                         agent-generated research artifacts
+├── SKILL-SIF/                     skill self-improvement workspace (`skill-sif` skill only)
 ├── user/                          user-owned material; preserve it
 ├── save/                          saved material; preserve it
 ├── commands.txt                   user and automation command recipes
@@ -170,6 +171,10 @@ the skill for the current stage.
   assumptions, not just a summary of the conversation.
 - `user/tmp/` holds the earlier Codex-oriented copies of these rules for
   reference only.
+- `SKILL-SIF/` is the offline benchmark and self-improvement loop for
+  `vuln-discovery`. It is not a research stage. Enter it only through the
+  `skill-sif` skill, and only when the user explicitly asks; do not read
+  its cases or ground truth during ordinary research.
 
 ## kernelCTF official tooling (`tools/kctf.sh`)
 

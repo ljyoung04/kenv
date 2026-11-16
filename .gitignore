@@ -35,3 +35,7 @@
 **/tmp/**
 **/.cache/**
 
+
+# SKILL-SIF
+/SKILL-SIF/inbox/*
+!/SKILL-SIF/inbox/.gitkeep

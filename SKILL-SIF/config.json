@@ -1,0 +1,25 @@
+{
+  "target_skill": "vuln-discovery",
+  "max_rounds": 10,
+  "patience": 2,
+  "topk": 3,
+  "line_tolerance": 2,
+  "max_range_lines": 15,
+  "src_exclude": [
+    "Documentation",
+    "tools/testing",
+    ".git"
+  ],
+  "run_timeout_sec": 5400,
+  "model": null,
+  "claude_args": [
+    "--permission-mode",
+    "acceptEdits",
+    "--allowedTools",
+    "Read,Grep,Glob,Write,Edit,Agent,Bash(rg:*),Bash(grep:*),Bash(sed:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*),Bash(head:*),Bash(tail:*),Bash(sha256sum:*)",
+    "--disallowedTools",
+    "WebSearch,WebFetch"
+  ],
+  "detector_model": null,
+  "diagnoser_model": null
+}

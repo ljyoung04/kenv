@@ -1,0 +1,5 @@
+# run workspaces (source snapshots, trajectories) are large and reproducible
+/runs/
+# user-supplied fix patches and derived cases may be kept locally only
+/inbox/*
+!/inbox/.gitkeep
