@@ -39,3 +39,6 @@
 # SKILL-SIF
 /SKILL-SIF/inbox/*
 !/SKILL-SIF/inbox/.gitkeep
+
+# SKILL-SIF case kernels (bzImage/vmlinux, ~1 GB each)
+/SKILL-SIF/vmimg/

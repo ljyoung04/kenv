@@ -12,15 +12,32 @@ explicit verdict with its limits.
 
 ## Scope
 
+<!-- sif:protected scope -->
 - Read root `AGENTS.md`, `scope.md`, and the candidate records first.
-- Run this stage only when the user asked for runtime validation. A
-  discovery-only request does not authorize running reproducers.
+- Run this stage when the user asked for runtime validation, or when
+  `vuln-discovery` hands candidates over in kernelCTF research (its
+  "Handoff" section; the user's standing instruction). Outside those two
+  cases a discovery-only request does not authorize running reproducers.
 - Write and minimize reproducers that **trigger and observe** the defect,
-  and nothing more.
+  and nothing more. Exploit development stays with the user.
+- Run reproducers only inside a task-owned VM, never on the host or in the
+  development container.
 - Write artifacts to `agent/<research-name>/validation/<candidate-id>/`. Keep
   the original Candidate-ID and Target-ID. Do not edit discovery records.
-- Work candidates one at a time by default. With subagents (only if the user
-  asks), give each worker its own candidate, output path, VM, and build dir.
+<!-- /sif:protected -->
+- Work without waiting for the user. Take the documented defaults, record
+  each decision and its reason, and stop only at the actions root
+  `AGENTS.md` reserves for the user; record those as `AWAITING_APPROVAL` and
+  continue with the other candidates.
+- Candidates may be worked one at a time or by subagents. Give each worker
+  its own candidate, output path, VM, and build dir. Worker settings: in
+  kernelCTF research `model: "opus"` (Opus 5.5), `effort: "max"`; otherwise
+  `model: "opus"` with no effort set; a user-named model or effort wins.
+  Record the model ID and effort used. On a model error retry once with
+  the same settings, then do the work yourself; do not substitute another
+  model.
+- Inside a SKILL-SIF benchmark workspace, its `task.md` defines the profile,
+  VM rules, budget, and output paths, and overrides §2 and "Completion".
 
 ## 1. Intake
 
@@ -54,7 +71,14 @@ try to win long races or refcount wraparounds by exhausting host resources.
 ### Profiles and builds
 
 - Discover profiles with `tools/vm.sh ls --json`. Do not guess.
-- Validation usually needs a **sanitizer build** next to the target build.
+- **Prefer official prebuilt KASAN artifacts.** For a kernelCTF LTS target,
+  use the official `lts-<ver>-kasan` release: check
+  `kernels/<release>-kasan/artifacts/` first, otherwise download only the
+  kernel image and `vmlinux` from the public release bucket over HTTPS (no
+  approval needed). Build a sanitizer kernel only when no official build
+  covers the target. Keep it within the disk budget recorded in `scope.md`,
+  delete the build tree afterwards, and keep only the image and `vmlinux`.
+- A local sanitizer build goes next to the target build.
   Use a separate profile and `KOBJ` (for example `<target>-kasan`) so the
   target build is never overwritten. Start from the target config, merge
   only the needed fragments (`configs/kasan_config`, `configs/debug_config`),
@@ -86,6 +110,7 @@ sites. See `../human-report/references/example1.md` for a real case.
 
 ### VM
 
+<!-- sif:protected vm -->
 - Name the VM `<task>_<unix-timestamp>` (letters, digits, `_`, `-`). Check
   `profiles/<p>/vms/` for collisions, including stopped VMs.
 - Boot with `tools/vm.sh -p <p> run <name>`. kenv uses `-enable-kvm -cpu host`.
@@ -96,7 +121,12 @@ sites. See `../human-report/references/example1.md` for a real case.
 - Transfer files with `tools/vm.sh -p <p> -v <v> scp ./file vm:/path`. Use
   `--shared` only if the user asked for a shared host directory.
 - Do not create images. If no suitable image exists, record the requirement
-  and stop. Run `tools/tracer.sh` helpers only inside the guest.
+  as `AWAITING_APPROVAL` (image creation needs sudo) and continue with work
+  that does not need it. Run `tools/tracer.sh` helpers only inside the guest.
+<!-- /sif:protected -->
+- On infrastructure errors (boot failure, SSH 251, image or tool problems)
+  retry the same experiment up to twice. Then record `INFRA_BLOCKED` with
+  the evidence and move on.
 
 `environment.md` records: source commit and local diff, config/vmlinux/bzImage
 hashes, compiler and build commands, boot arguments (including
@@ -106,13 +136,19 @@ compare the build ID or banner with your build.
 
 ### KernelCTF
 
-Re-check the current rules and the required LTS trigger read-only. If the
-rules require an LTS crash, run it as a **separate experiment** on the
-matching LTS profile (for example `kernels/lts-<ver>` and `-kasan`), with its
-own hashes. Keep KASAN-only crashes separate from crashes on the
-uninstrumented LTS build. Remote runs need `kctf-official-helper` and
-explicit user approval for that exact action.
+Re-check the current rules and the required LTS trigger read-only. In
+kernelCTF research, every candidate found on the hardened tree is also run
+as a **separate experiment** on the active LTS (the release `vuln-discovery`
+recorded from `info`), locally on its official KASAN artifacts (for example
+`kernels/lts-<ver>-kasan`), with its own hashes. This answers whether the
+root cause actually triggers on LTS. Keep KASAN-only crashes separate from
+crashes on the uninstrumented LTS build.
+<!-- sif:protected official-service -->Runs on the official service
+(`vuln-test`) need `kctf-official-helper` and explicit user approval for that
+exact action and attempt count. Do not wait for it: record the candidate as
+`AWAITING_APPROVAL: official vuln-test` with the reproducer hash, and go on.<!-- /sif:protected -->
 
+<!-- sif:editable poc -->
 ## 3. Reproducer loop
 
 1. Write a readable reproducer that contains only the operations needed
@@ -169,6 +205,7 @@ When a crash occurs, save the original evidence before running again.
   supporting evidence, not proof by itself.
 
 If minimizing loses the reproduction, keep the last version that reproduced.
+<!-- /sif:editable -->
 
 ## 5. Impact class (evidence only)
 

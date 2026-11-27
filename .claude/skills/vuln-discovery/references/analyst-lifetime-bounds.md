@@ -1,8 +1,7 @@
 # Analyst pass: lifetime, concurrency, and bounds
 
-Read this when you are an analyst or a re-verifier for `vuln-discovery`. You
-run on the strongest model because this is where kernel bugs are found or
-missed. The free is often in one file, the use in another, and the lock that
+Read this when you are an analyst or a re-verifier for `vuln-discovery`. This is
+where kernel bugs are found or missed. The free is often in one file, the use in another, and the lock that
 should order them in a third. The bug is the missing relation between them,
 and reasoning one function at a time does not see it. Track each object's
 state as it changes across functions, files, and execution contexts until
@@ -37,8 +36,8 @@ If `targets.md` marks the map `INCOMPLETE`, rebuild the listed parts first.
 
 ## Step 1 — Rebuild the release side
 
-The map came from a cheaper model, so do not rely on it until you have
-checked it. For each object you reason about:
+The map came from a breadth-first pass, so do not rely on it until you
+have checked it. For each object you reason about:
 
 1. Re-run the map's searches, and add your own for that object's release
    paths: helpers, ops-table callbacks, container removal, async cancel,

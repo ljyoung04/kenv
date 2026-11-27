@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-"""sif — SKILL-SIF workspace driver (offline, self-contained).
+"""sif — SKILL-SIF workspace driver.
 
-Iterative self-improvement loop for a kernel vulnerability-detection skill:
-  case add (user-supplied source) -> gen init -> run -> score -> diagnose -> gen new (edit) -> lint
-  -> run -> score -> ... -> freeze -> run/score --split test -> promote
+Self-improvement loop for the kernel vulnerability skills (vuln-discovery for
+the root cause, the reproducer part of dynamic-validation for the KASAN PoC):
 
-Everything is read and written under the SKILL-SIF root. The outside world is
-reached only through the symlinks in links/, and the only outside WRITE is
-`promote`, which copies the frozen generation over the live skill.
+  case add (collected by the orchestrator) -> case verify (public PoC in a VM)
+  -> case review -> gen init -> dispatch control / detector (N runs per case)
+  -> score (root cause + PoC re-run in fresh VMs) -> dispatch diagnoser
+  -> diagnose -> gen new (edit) -> gen lint -> dispatch ... -> freeze
+  -> test split -> promote --auto (guarded write-back)
+
+Reads and writes stay under the SKILL-SIF root, except through the symlinks in
+links/: tools/vm.sh is called, run profiles are created under links/profiles
+(names `sif-*`, removed by sif itself), kernels/images are read, and the skills
+are written only by `promote`.
 """
-import argparse, datetime, hashlib, json, os, re, shutil, subprocess, sys, tempfile
+import argparse, datetime, gzip, hashlib, json, os, random, re, secrets, shutil, subprocess, sys, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -19,6 +25,11 @@ CFG = json.loads((ROOT / "config.json").read_text())
 STATE = ROOT / "state.json"
 SPLITS = ("refine", "test")
 SRC_EXT = (".c", ".h", ".S", ".rs")
+VM_SH = LINKS / "tools" / "vm.sh"
+PROFILES = LINKS / "profiles"
+VMIMG = ROOT / "vmimg"
+CONTROL = "control"
+_state_lock = threading.Lock()
 
 
 def die(msg):
@@ -37,6 +48,11 @@ def save_state(s):
     STATE.write_text(json.dumps(s, indent=2) + "\n")
 
 
+def update_state(fn):
+    with _state_lock:
+        s = state(); fn(s); save_state(s)
+
+
 def inside(p):
     """Lexical containment check: the path as written must stay under ROOT
     (symlinks in links/ are the sanctioned way out, so do not resolve them)."""
@@ -46,19 +62,12 @@ def inside(p):
     return p
 
 
-def locked(d):
-    return (os.stat(ROOT / d).st_mode & 0o777) == 0
+def skills_cfg():
+    return CFG["target_skills"]
 
 
-def set_lock(d, on):
-    os.chmod(ROOT / d, 0o000 if on else 0o755)
-
-
-def lock_answers():
-    """Detectors are about to run: make inbox/ (sources' intended answers, sol.md)
-    and cases/ (ground truth) unreadable. `sif score` reopens cases/; inbox/ stays
-    closed until `sif case add` (transiently) or `sif unlock --inbox`."""
-    set_lock("inbox", True); set_lock("cases", True)
+def live_skill(name):
+    return LINKS / "skills" / name
 
 
 def tree_sha(d):
@@ -68,7 +77,68 @@ def tree_sha(d):
     return h.hexdigest()
 
 
+def file_sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+def rid(n=4):
+    return secrets.token_hex(n)
+
+
+# ───────────────────────────── locks ─────────────────────────────
+# Detection phases make the answers (inbox/, cases/), the skill generations, and
+# the live skills unreadable; a control phase also locks the treatment runs.
+# The lock stops reads through normal tools; it is not a sandbox.
+
+def lock_targets(kind):
+    t = [ROOT / "inbox", ROOT / "cases", ROOT / "generations", ROOT / "lessons", ROOT / "scores", ROOT / "archive", VMIMG]
+    t += [live_skill(n).resolve() for n in skills_cfg()]
+    if kind == CONTROL:
+        t += sorted((ROOT / "runs").glob("gen-[0-9][0-9]"))
+    return [p for p in t if p.exists()]
+
+
+def lock(kind, gen, split):
+    s = state()
+    if s.get("phase"):
+        die(f"a detection phase is already open ({s['phase']['kind']} {s['phase'].get('gen')} {s['phase'].get('split')}); "
+            "score it first (`sif score ...`)")
+    locked = []
+    for p in lock_targets(kind):
+        if p == VMIMG:
+            continue  # images stay readable: QEMU (same user) reads them; the paths are opaque
+        locked.append({"path": str(p), "mode": os.stat(p).st_mode & 0o777})
+        os.chmod(p, 0o000)
+    s["phase"] = {"kind": kind, "gen": gen, "split": split, "since": now(), "locked": locked}
+    s["loop_started"] = s.get("loop_started") or now()  # the wall-time budget counts from the first detection phase
+    save_state(s)
+
+
+def unlock_all():
+    s = state()
+    ph = s.get("phase")
+    for x in (ph or {}).get("locked", []):
+        try:
+            os.chmod(x["path"], x["mode"] or 0o755)
+        except FileNotFoundError:
+            pass
+    for d in ("inbox", "cases", "generations", "lessons", "scores", "archive"):
+        p = ROOT / d
+        if p.exists() and (os.stat(p).st_mode & 0o777) == 0:
+            os.chmod(p, 0o755)
+    s["phase"] = None
+    save_state(s)
+
+
+def phase():
+    return state().get("phase")
+
+
+# ───────────────────────────── naming ─────────────────────────────
+
 def gname(n):
+    if n == CONTROL:
+        return CONTROL
     if isinstance(n, str) and n.startswith("gen-"):
         return n
     return f"gen-{int(n):02d}"
@@ -82,17 +152,137 @@ def gen_meta(g):
     return json.loads((ROOT / "generations" / g / "GEN.json").read_text())
 
 
-def live_skill():
-    return LINKS / "skills" / CFG["target_skill"]
-
-
 def cases(split):
-    return sorted(p.name for p in (ROOT / "cases" / split).iterdir() if (p / "case.json").exists())
+    d = ROOT / "cases" / split
+    return sorted(p.name for p in d.iterdir() if (p / "case.json").exists()) if d.exists() else []
 
 
 def load_case(split, cid):
     d = ROOT / "cases" / split / cid
     return json.loads((d / "case.json").read_text()), json.loads((d / "truth.json").read_text())
+
+
+def save_case(split, cid, case=None, truth=None):
+    d = ROOT / "cases" / split / cid
+    if case is not None:
+        (d / "case.json").write_text(json.dumps(case, indent=2) + "\n")
+    if truth is not None:
+        (d / "truth.json").write_text(json.dumps(truth, indent=2) + "\n")
+
+
+def find_case(cid):
+    for s in SPLITS:
+        if (ROOT / "cases" / s / cid / "case.json").exists():
+            return s
+    die(f"no case {cid}")
+
+
+def nruns():
+    return int(CFG["runs_per_case"])
+
+
+def run_dir(group, split, cid, k):
+    return ROOT / "runs" / group / split / cid / f"r{k}"
+
+
+# ───────────────────────────── source handling ─────────────────────────────
+
+INCLUDE_DIRS = ("include", "arch/x86/include", "include/uapi", "arch/x86/include/uapi",
+                "arch/x86/include/generated", "arch/x86/include/generated/uapi", "include/generated", "include/generated/uapi")
+VERSION_FILES = re.compile(r"(^|/)(utsrelease\.h|compile\.h|version\.h)$")
+INC_RE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]+)[>"]', re.M)
+CONFIG_DROP = re.compile(r"^(# Linux/|# Automatically generated|# Compiler:|(# )?CONFIG_(\w*_VERSION\w*|\w*VERSION_TEXT|LOCALVERSION\w*|BUILD_SALT)[= ])")
+
+
+def include_closure(src, files):
+    """Files (relative to src) reachable through #include from the given files."""
+    seen, todo = set(files), list(files)
+    while todo:
+        f = todo.pop()
+        p = src / f
+        if not p.is_file() or not f.endswith((".c", ".h", ".S")):
+            continue
+        for kind, inc in INC_RE.findall(p.read_text(errors="replace")):
+            cands = ([str(Path(f).parent / inc)] if kind == '"' else []) + [f"{d}/{inc}" for d in INCLUDE_DIRS]
+            for c in cands:
+                c = os.path.normpath(c)
+                if c.startswith("..") or VERSION_FILES.search(c):
+                    continue
+                if (src / c).is_file():
+                    if c not in seen:
+                        seen.add(c); todo.append(c)
+                    break
+    return seen
+
+
+def sanitize_config(text):
+    return "\n".join(l for l in text.splitlines() if not CONFIG_DROP.match(l)) + "\n"
+
+
+def extract_tree(src, scope, dst, config_text):
+    """Copy only the scope directories, the headers they include (transitively),
+    and a version-stripped kernel config into dst."""
+    files = set()
+    for s in scope:
+        d = src / s
+        if d.is_file():
+            files.add(s)
+        elif d.is_dir():
+            files.update(str(p.relative_to(src)) for p in d.rglob("*") if p.is_file())
+        else:
+            die(f"scope {s} does not exist in the source")
+    files = {f for f in files if not any(f.startswith(x + "/") or f == x for x in CFG["src_exclude"])}
+    files |= include_closure(src, sorted(f for f in files if f.endswith((".c", ".h", ".S"))))
+    for f in sorted(files):
+        if VERSION_FILES.search(f) and "generated" in f:
+            continue
+        (dst / f).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src / f, dst / f)
+    if config_text:
+        (dst / ".config").write_text(sanitize_config(config_text))
+    return len(files)
+
+
+def import_kernel(kdir, img):
+    """Copy (hard-link when possible) a KASAN kernel image and vmlinux into
+    vmimg/<img>/ so that profiles and VM metadata show only an opaque path."""
+    k = Path(kdir) if os.path.isabs(str(kdir)) else ROOT / kdir
+    cands = [k / "bzImage", k / "arch/x86/boot/bzImage", k / "artifacts/bzImage"]
+    bz = next((c for c in cands if c.is_file()), None)
+    if not bz:
+        die(f"no bzImage under {kdir}")
+    dst = VMIMG / img
+    dst.mkdir(parents=True)
+
+    def put(a, b):
+        try:
+            os.link(a, b)
+        except OSError:
+            shutil.copy2(a, b)
+    put(bz, dst / "bzImage")
+    base = bz.parent
+    vml = next((c for c in (base / "vmlinux", k / "vmlinux") if c.is_file()), None)
+    vgz = next((c for c in (base / "vmlinux.gz", k / "vmlinux.gz") if c.is_file()), None)
+    if vml:
+        put(vml, dst / "vmlinux")
+    elif vgz:
+        with gzip.open(vgz, "rb") as i, open(dst / "vmlinux", "wb") as o:
+            shutil.copyfileobj(i, o)
+    return {"img": img, "from": str(bz), "bzImage_sha256": file_sha(dst / "bzImage"), "vmlinux": (dst / "vmlinux").exists()}
+
+
+def disk_gb():
+    total = 0
+    for dp, dn, fn in os.walk(ROOT):
+        if Path(dp) == LINKS:
+            dn[:] = []; continue
+        for f in fn:
+            try:
+                st = os.lstat(os.path.join(dp, f))
+                total += st.st_blocks * 512
+            except OSError:
+                pass
+    return round(total / 1e9, 2)
 
 
 # ───────────────────────────── cases ─────────────────────────────
@@ -108,7 +298,7 @@ def enclosing_function(lines, ln):
             break
         if lines[j].startswith("}") and j != i:
             break
-    if start is None:  # maybe on the signature: look a few lines ahead
+    if start is None:
         for j in range(i, min(i + 12, len(lines))):
             if lines[j].startswith("{"):
                 start = j
@@ -142,19 +332,17 @@ def derive_truth(before_dir, after_dir, files):
             continue
         b, a = before_dir / f, after_dir / f
         if not b.exists():
-            continue  # file created by the fix: no before-fix location
+            continue
         truth["files"].append(f)
         blines = b.read_text(errors="replace").splitlines()
-        out = subprocess.run(["diff", "-U0", str(b), str(a) if a.exists() else "/dev/null"],
-                             capture_output=True, text=True).stdout
+        out = subprocess.run(["diff", "-U0", str(b), str(a) if a.exists() else "/dev/null"], capture_output=True, text=True).stdout
         for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", out, re.M):
             s, n = int(m.group(1)), int(m.group(2) or 1)
             kind = "changed" if n else "insertion-anchor"
             lo, hi = (s, s + n - 1) if n else (max(s, 1), min(s + 1, len(blines)))
             names = enclosing_function(blines, lo) or enclosing_function(blines, hi)
             truth["statements"].append({"file": f, "start": lo, "end": hi, "kind": kind,
-                                        "function": names[0] if names else None,
-                                        "text": blines[lo - 1:hi][:6]})
+                                        "function": names[0] if names else None, "text": blines[lo - 1:hi][:6]})
             if names and not any(x["file"] == f and x["names"] == names for x in truth["functions"]):
                 truth["functions"].append({"file": f, "names": names})
     return truth
@@ -164,12 +352,10 @@ def patch_files(patch_text):
     return sorted({m.group(1) for m in re.finditer(r"^(?:---|\+\+\+) [ab]/(\S+)", patch_text, re.M)})
 
 
-ANSWER_FILES = ("sol.md", "fixed", "fix.patch", "truth.json")
+ANSWER_FILES = ("sol.md", "fixed", "fix.patch", "truth.json", "poc", "kasan.log")
 
 
 def truth_from_sol(src, text):
-    """Draft only: collect `path:line` / `path:line-line` citations in sol.md that
-    resolve inside the source. The orchestrator must reconcile it with sol.md."""
     t = {"reviewed": False, "from": "sol.md", "files": [], "functions": [], "statements": []}
     for m in re.finditer(r"([A-Za-z0-9_./+-]+\.(?:c|h|S|rs)):(\d+)(?:\s*[-–~]\s*(\d+))?", text):
         f, lo, hi = norm_path(m.group(1)), int(m.group(2)), int(m.group(3) or m.group(2))
@@ -190,41 +376,56 @@ def truth_from_sol(src, text):
     return t
 
 
-def check_truth(t):
+def check_truth(t, src=None):
     try:
-        assert t["statements"] and isinstance(t["functions"], list)
+        assert t["statements"] and isinstance(t["functions"], list) and t["functions"]
         for x in t["statements"]:
             assert isinstance(x["file"], str) and isinstance(x["start"], int) and isinstance(x["end"], int) and x["start"] <= x["end"]
+            if src is not None:
+                n = len((src / x["file"]).read_text(errors="replace").splitlines())
+                assert 1 <= x["start"] and x["end"] <= n
         for x in t["functions"]:
             assert isinstance(x["file"], str) and x["names"] and all(isinstance(n, str) for n in x["names"])
+            if src is not None:
+                assert (src / x["file"]).is_file()
     except Exception:
-        die('truth must look like {"functions": [{"file", "names": [..]}], "statements": [{"file", "start", "end"}]}')
+        die('truth must look like {"functions": [{"file", "names": [..]}], "statements": [{"file", "start", "end"}]} '
+            "with files and lines that exist in the stored src/")
     t["files"] = sorted({x["file"] for x in t["statements"]} | {x["file"] for x in t["functions"]})
     return t
 
 
 def cmd_case_add(a):
-    """A case = vulnerable source supplied by the user + ground truth from exactly
-    one of: sol.md (the user's intended answer), the fixed source, the fix patch,
-    or a hand-written truth file."""
-    was_locked = locked("inbox")
-    set_lock("inbox", False)
+    was = (os.stat(ROOT / "inbox").st_mode & 0o777)
+    os.chmod(ROOT / "inbox", 0o755)
     try:
         _case_add(a)
     finally:
-        set_lock("inbox", was_locked)
+        if was == 0:
+            os.chmod(ROOT / "inbox", 0o000)
 
 
 def _case_add(a):
+    if phase():
+        die("a detection phase is open; score it before adding cases")
+    n = sum(len(cases(s)) for s in SPLITS)
+    if n >= CFG["budget"]["max_cases"]:
+        die(f"case budget reached ({n}/{CFG['budget']['max_cases']})")
+    if disk_gb() > CFG["budget"]["max_disk_gb"]:
+        die(f"disk budget exceeded ({disk_gb()} GB > {CFG['budget']['max_disk_gb']} GB): drop or clean before adding")
     if a.from_:
         d = inside(a.from_)
         a.src = a.src or str(d / "src" if (d / "src").is_dir() else d)
-        a.id = a.id or d.name
         if not (a.fixed or a.patch or a.truth or a.sol):
-            a.sol = str(d / "sol.md")
-    if not a.src or not a.id:
-        die("give --from inbox/<source-version>, or --id with --src")
-    cid = a.id
+            a.sol = str(d / "sol.md") if (d / "sol.md").is_file() else None
+            if not a.sol and (d / "fix.patch").is_file():
+                a.patch = str(d / "fix.patch")
+        for opt, name in (("poc", "poc"), ("kernel", "kernel"), ("kasan_log", "kasan.log"), ("fix", "fix.patch"), ("config", "config")):
+            if not getattr(a, opt) and (d / name).exists() and not (opt == "fix" and a.patch):
+                setattr(a, opt, str(d / name))
+    if not a.src:
+        die("give --from inbox/<folder>, or --src")
+    cid = a.id or f"c{rid()}"
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", cid):
         die("bad case id")
     for s in SPLITS:
@@ -232,39 +433,38 @@ def _case_add(a):
             die(f"case {cid} already exists in split {s}")
     if sum(bool(x) for x in (a.fixed, a.patch, a.truth, a.sol)) != 1:
         die("give exactly one ground-truth source: --sol <sol.md>, --fixed <dir>, --patch <file>, or --truth <json>")
-    src = inside(a.src)
+    poc_on = CFG["poc"]["enabled"]
+    if poc_on and not (a.poc and a.kernel):
+        die("PoC scoring is enabled: give --poc <dir with poc.c> and --kernel <dir with bzImage [vmlinux]> (or put poc/ and kernel/ in the inbox folder)")
+    split = a.split
+    if split == "auto":
+        split = "test" if random.random() < CFG["test_fraction"] else "refine"
+    src = Path(a.src) if os.path.isabs(str(a.src)) else ROOT / a.src
     if not src.is_dir():
         die(f"{a.src} is not a directory")
-    soltxt = None
-    if a.sol:
-        if not inside(a.sol).is_file():
-            die(f"{a.sol} not found: the intended answer is expected at inbox/<source-version>/sol.md")
-        soltxt = inside(a.sol).read_text(errors="replace")
-        if not a.cwe:
-            found = sorted(set(re.findall(r"CWE-\d+", soltxt)))
-            if len(found) != 1:
-                die(f"sol.md names {len(found)} CWE ids {found}; pass --cwe (and --cwe-accept) explicitly")
-            a.cwe = found[0]
+    soltxt = inside(a.sol).read_text(errors="replace") if a.sol else None
+    if a.sol and not a.cwe:
+        found = sorted(set(re.findall(r"CWE-\d+", soltxt)))
+        if len(found) != 1:
+            die(f"sol.md names {len(found)} CWE ids {found}; pass --cwe (and --cwe-accept) explicitly")
+        a.cwe = found[0]
     if not a.cwe or not re.fullmatch(r"CWE-\d+", a.cwe):
         die("--cwe must look like CWE-416")
-    case = {"id": cid, "split": a.split, "cve": a.cve, "cwe": a.cwe, "cwe_accept": sorted(set(a.cwe_accept or [])),
-            "created": now(), "source": {"from": str(a.src), "truth_from": "sol" if a.sol else "fixed" if a.fixed else "patch" if a.patch else "truth"}}
-    ptxt = None
     tmp = Path(tempfile.mkdtemp(prefix="case-", dir=ROOT / "runs"))
+    ptxt = None
     try:
         if a.sol:
             truth = truth_from_sol(src, soltxt)
         elif a.truth:
-            truth = check_truth(json.loads(inside(a.truth).read_text()))
-            truth.setdefault("reviewed", False)
+            truth = check_truth(json.loads(Path(a.truth).read_text()))
+            truth["reviewed"] = False
         elif a.fixed:
-            fixed = inside(a.fixed)
+            fixed = Path(a.fixed)
             files = sorted(str(f.relative_to(fixed)) for f in fixed.rglob("*")
-                           if f.is_file() and (src / f.relative_to(fixed)).is_file()
-                           and f.read_bytes() != (src / f.relative_to(fixed)).read_bytes())
+                           if f.is_file() and (src / f.relative_to(fixed)).is_file() and f.read_bytes() != (src / f.relative_to(fixed)).read_bytes())
             truth = derive_truth(src, fixed, files)
         else:
-            ptxt = inside(a.patch).read_text(errors="replace")
+            ptxt = Path(a.patch).read_text(errors="replace")
             files = patch_files(ptxt)
             w = tmp / "w"; w.mkdir()
             for f in files:
@@ -274,45 +474,73 @@ def _case_add(a):
             run = lambda *x: subprocess.run(["patch", "-p1", "-s", "-f", "-d", str(w), *x], input=ptxt, capture_output=True, text=True)
             if run("--dry-run").returncode != 0:
                 if run("-R", "--dry-run").returncode == 0:
-                    die("the patch reverse-applies: the supplied source already contains the fix, so it is not a vulnerable snapshot")
-                die("the patch does not apply to the supplied source; it must be the fix for exactly this source")
+                    die("the patch reverse-applies: the source already contains the fix, so it is not a vulnerable snapshot")
+                die("the patch does not apply to the source; it must be the fix for exactly this source")
             run()
             truth = derive_truth(src, w, files)
             subj = re.search(r"^Subject: (?:\[[^\]]*\] )?(.+)$", ptxt, re.M)
             truth["fix_subject"] = subj.group(1).strip() if subj else None
-        if not truth["statements"] and not a.sol:
-            die("no source-level difference found between the vulnerable source and the fix")
-        missing = [f for f in truth["files"] if not (src / f).is_file()]
-        if missing:
-            die(f"truth names files that are not in the supplied source: {missing}")
-        case["target_files"] = a.target_files or truth["files"]
-        dst = ROOT / "cases" / a.split / cid
+        scope = a.scope or sorted({str(Path(f).parent) for f in truth["files"]})
+        if not scope:
+            die("cannot derive the subsystem scope from the truth draft; pass --scope <dir> [...]")
+        dst = ROOT / "cases" / split / cid
         dst.mkdir(parents=True)
-        subprocess.run(["cp", "-a", "--reflink=auto", str(src), str(dst / "src")], check=True)
-        for n in ANSWER_FILES:  # answers that sat next to the source never enter the stored source
-            q = dst / "src" / n
+        cfg_text = None
+        if a.config:
+            cfg_text = Path(a.config).read_text(errors="replace")
+        elif (src / ".config").is_file():
+            cfg_text = (src / ".config").read_text(errors="replace")
+        (dst / "src").mkdir()
+        if a.no_extract:
+            subprocess.run(["cp", "-a", "--reflink=auto", f"{src}/.", str(dst / "src")], check=True)
+            for ex in CFG["src_exclude"] + [".git"]:
+                shutil.rmtree(dst / "src" / ex, ignore_errors=True)
+            if cfg_text:
+                (dst / "src" / ".config").write_text(sanitize_config(cfg_text))
+        else:
+            extract_tree(src, scope, dst / "src", cfg_text)
+        for nme in ANSWER_FILES:
+            q = dst / "src" / nme
             if q.is_dir() and not q.is_symlink():
                 shutil.rmtree(q)
             elif q.exists() or q.is_symlink():
                 q.unlink()
+        missing = [f for f in truth["files"] if not (dst / "src" / f).is_file()]
+        if missing:
+            shutil.rmtree(dst)
+            die(f"truth names files that are not in the stored source (outside --scope?): {missing}")
         if soltxt is not None:
             (dst / "sol.md").write_text(soltxt)
         if ptxt:
             (dst / "fix.patch").write_text(ptxt)
-        if a.fixed:  # keep only the changed files of the fixed side, for diagnosis
+        elif a.fix:
+            shutil.copy2(a.fix, dst / "fix.patch")
+        if a.fixed:
             for f in truth["files"]:
                 (dst / "fixed" / f).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(inside(a.fixed) / f, dst / "fixed" / f)
-        case["source"]["files"] = sum(1 for f in (dst / "src").rglob("*") if f.is_file())
+                shutil.copy2(Path(a.fixed) / f, dst / "fixed" / f)
+        if a.poc:
+            shutil.copytree(a.poc, dst / "poc")
+            if not (dst / "poc" / "poc.c").is_file():
+                shutil.rmtree(dst)
+                die("the public PoC must be normalised to poc/poc.c (+ optional ldlibs.txt, run.json)")
+        if a.kasan_log:
+            shutil.copy2(a.kasan_log, dst / "kasan.public.log")
+        case = {"id": cid, "split": split, "cve": a.cve, "cwe": a.cwe, "cwe_accept": sorted(set(a.cwe_accept or [])),
+                "created": now(), "scope": scope, "version_exposed": not a.version_hidden,
+                "source": {"from": str(a.src), "truth_from": "sol" if a.sol else "fixed" if a.fixed else "patch" if a.patch else "truth",
+                           "files": sum(1 for f in (dst / "src").rglob("*") if f.is_file()), "extracted": not a.no_extract},
+                "verified": None}
+        if a.kernel:
+            case["image"] = import_kernel(a.kernel, f"i{rid()}")
         (dst / "truth.json").write_text(json.dumps(truth, indent=2) + "\n")
         (dst / "case.json").write_text(json.dumps(case, indent=2) + "\n")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print(f"added {a.split}/{cid}: source {case['source']['files']} file(s); truth: {len(truth['files'])} file(s), "
-          f"{len(truth['functions'])} function(s), {len(truth['statements'])} statement range(s)\n"
-          + (f"sol.md copied to {dst.relative_to(ROOT)}/sol.md. truth.json is only a draft from its path:line citations: "
-             f"transcribe sol.md into truth.json (functions, statements), then set \"reviewed\": true"
-             if a.sol else f"review {dst.relative_to(ROOT)}/truth.json and set \"reviewed\": true"))
+    print(f"added {split}/{cid}: scope {scope}, stored source {case['source']['files']} file(s); truth draft: "
+          f"{len(truth['functions'])} function(s), {len(truth['statements'])} statement range(s).\n"
+          f"Next: `sif case verify {cid}` (public PoC in a VM), complete cases/{split}/{cid}/truth.json "
+          f"(functions, statements, kasan.functions), then `sif case review {cid}`.")
 
 
 def cmd_case_ls(a):
@@ -320,42 +548,139 @@ def cmd_case_ls(a):
         for cid in cases(s):
             c, t = load_case(s, cid)
             fn = ",".join(f["names"][0] for f in t["functions"]) or "-"
-            print(f"{s:6} {cid:28} {c['cwe']:8} reviewed={str(t.get('reviewed')).lower():5} {fn}")
-    if a.verbose:
-        print({s: len(cases(s)) for s in SPLITS})
+            print(f"{s:6} {cid:12} {c['cwe']:8} reviewed={str(t.get('reviewed')).lower():5} verified={str(c.get('verified')).lower():5} "
+                  f"scope={','.join(c.get('scope', []))} {fn}")
+    print({s: len(cases(s)) for s in SPLITS})
+
+
+def cmd_case_verify(a):
+    """Run the public PoC on the case's KASAN kernel in fresh VMs. A case whose
+    public PoC does not reproduce is not usable (drop it)."""
+    if phase():
+        die("a detection phase is open")
+    split = find_case(a.id)
+    c, t = load_case(split, a.id)
+    d = ROOT / "cases" / split / a.id
+    res = poc_score(c, d / "poc", d / "verify", truth=None, attempts=CFG["poc"]["verify_attempts"])
+    c["verified"] = bool(res.get("kasan"))
+    c["verify"] = {k: v for k, v in res.items() if k != "kasan"}
+    if res.get("kasan"):
+        shutil.copy2(d / "verify" / res["log"], d / "kasan.log")
+        k = res["kasan"]
+        t.setdefault("kasan", {"type": k["type"], "functions": [k["func"]], "frames": k["frames"][:10],
+                               "note": "draft from the verified public PoC: keep only the functions that identify the root cause"})
+        t["reviewed"] = False
+        save_case(split, a.id, c, t)
+        print(f"{a.id}: public PoC reproduced: KASAN {k['type']} in {k['func']}; draft truth.kasan written. "
+              f"Review truth.json, then `sif case review {a.id}`.")
+    else:
+        save_case(split, a.id, c)
+        print(f"{a.id}: public PoC did NOT produce a KASAN report ({res.get('note')}). Drop the case: `sif case drop {a.id} --reason ...`")
+
+
+def cmd_case_review(a):
+    """Validate the orchestrator's transcription of the answer and mark it reviewed."""
+    split = find_case(a.id)
+    c, t = load_case(split, a.id)
+    src = ROOT / "cases" / split / a.id / "src"
+    t = check_truth(t, src)
+    if CFG["poc"]["enabled"]:
+        if c.get("verified") is not True:
+            die("the public PoC has not reproduced on this case's kernel (`sif case verify`)")
+        k = t.get("kasan") or {}
+        if not k.get("functions"):
+            die("truth.kasan.functions is empty")
+    t["reviewed"] = True
+    t["reviewed_at"] = now()
+    save_case(split, a.id, truth=t)
+    print(f"{a.id}: truth reviewed ({len(t['functions'])} function(s), {len(t['statements'])} statement range(s))")
+
+
+def cmd_case_drop(a):
+    split = find_case(a.id)
+    c, _ = load_case(split, a.id)
+    dst = ROOT / "archive" / "dropped" / a.id
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(ROOT / "cases" / split / a.id), str(dst))
+    if c.get("image"):
+        shutil.rmtree(VMIMG / c["image"]["img"], ignore_errors=True)
+    update_state(lambda s: s.setdefault("dropped", []).append({"id": a.id, "split": split, "reason": a.reason, "at": now()}))
+    print(f"dropped {split}/{a.id}: {a.reason} (kept in archive/dropped/, image removed)")
 
 
 # ─────────────────────────── generations ───────────────────────────
 
+PROT_RE = re.compile(r"<!-- sif:protected (\S+) -->(.*?)<!-- /sif:protected -->", re.S)
+EDIT_RE = re.compile(r"(<!-- sif:editable (\S+) -->)(.*?)(<!-- /sif:editable -->)", re.S)
+
+
+def guard_errors(base, new, mode):
+    """Safety rules of a skill sit in `sif:protected` blocks and must stay byte-identical.
+    For an `editable`-mode skill, only text inside `sif:editable` blocks may change."""
+    errs = []
+    files = {p.relative_to(base) for p in base.rglob("*") if p.is_file()} | {p.relative_to(new) for p in new.rglob("*") if p.is_file()}
+    for f in sorted(files):
+        b = (base / f).read_text(errors="replace") if (base / f).is_file() else ""
+        n = (new / f).read_text(errors="replace") if (new / f).is_file() else ""
+        if sorted(PROT_RE.findall(b)) != sorted(PROT_RE.findall(n)):
+            errs.append(f"{f}: a sif:protected block was changed, removed, or added")
+        if mode == "editable":
+            out = lambda x: EDIT_RE.sub(lambda m: m.group(1) + "…" + m.group(4), x)
+            if out(b) != out(n):
+                errs.append(f"{f}: text outside the sif:editable blocks changed (only the reproducer procedure may change)")
+    return errs
+
+
 def cmd_gen_init(a):
     if gens():
-        die("generations already exist")
-    src = live_skill()
-    if not (src / "SKILL.md").exists():
-        die(f"{src} has no SKILL.md")
+        die("generations already exist (archive the old loop first)")
     g = ROOT / "generations" / "gen-00"
-    shutil.copytree(src, g / "skill", symlinks=False)
-    sha = tree_sha(g / "skill")
-    (g / "GEN.json").write_text(json.dumps({"gen": "gen-00", "parent": None, "created": now(),
-                                            "note": "baseline: copy of live skill", "skill_sha256": sha}, indent=2) + "\n")
-    s = state(); s.update({"target_skill": CFG["target_skill"], "base_sha256": sha, "frozen": None}); save_state(s)
-    print(f"gen-00 created from links/skills/{CFG['target_skill']} sha256={sha[:16]}")
+    for name in skills_cfg():
+        src = live_skill(name)
+        if not (src / "SKILL.md").exists():
+            die(f"{src} has no SKILL.md")
+        shutil.copytree(src, g / "skills" / name, symlinks=False)
+    sha = tree_sha(g / "skills")
+    (g / "GEN.json").write_text(json.dumps({"gen": "gen-00", "parent": None, "created": now(), "note": "baseline: copy of the live skills",
+                                            "skill_sha256": sha, "linted": now()}, indent=2) + "\n")
+    base = {n: tree_sha(live_skill(n)) for n in skills_cfg()}
+    update_state(lambda s: s.update({"target_skills": list(skills_cfg()), "base_sha256": base, "frozen": None,
+                                     "loop_started": None, "settings": settings()}))
+    print(f"gen-00 created from the live skills {list(skills_cfg())} sha256={sha[:16]}")
 
 
-def refine_score(g):
-    p = ROOT / "scores" / f"{g}.refine.json"
+def settings():
+    return {"model": CFG["detector_model"], "model_id": CFG["model_id"], "effort": CFG["effort"], "runs_per_case": nruns(),
+            "poc": CFG["poc"]["enabled"]}
+
+
+def score_file(group, split):
+    p = ROOT / "scores" / f"{group}.{split}.json"
     return json.loads(p.read_text()) if p.exists() else None
 
 
+def metric(sc):
+    return sc["summary"]["combined"] if sc else None
+
+
+def budget_stop():
+    s = state()
+    if s.get("loop_started"):
+        t0 = datetime.datetime.fromisoformat(s["loop_started"])
+        h = (datetime.datetime.now().astimezone() - t0).total_seconds() / 3600
+        if h > CFG["budget"]["max_wall_hours"]:
+            return f"wall-time budget exhausted ({h:.1f} h > {CFG['budget']['max_wall_hours']} h)"
+    return None
+
+
 def loop_status():
-    """Return (rows, best, stop_reason). Best = highest refine fully-correct, earliest on ties."""
-    rows, best, best_full = [], None, -1
+    rows, best, best_m = [], None, -1.0
     for g in gens():
-        sc = refine_score(g)
-        full = sc["summary"]["full"] if sc else None
+        sc = score_file(g, "refine")
+        m = metric(sc)
         rows.append((g, gen_meta(g).get("parent"), sc))
-        if full is not None and full > best_full:
-            best, best_full = g, full
+        if m is not None and m > best_m:
+            best, best_m = g, m
     scored = [g for g, _, sc in rows if sc]
     stop = None
     if best:
@@ -364,6 +689,7 @@ def loop_status():
             stop = f"no improvement over {best} for {since} consecutive round(s)"
         elif len(scored) - 1 >= CFG["max_rounds"]:
             stop = f"max_rounds={CFG['max_rounds']} reached"
+        stop = stop or budget_stop()
     return rows, best, stop
 
 
@@ -372,54 +698,62 @@ def cmd_gen_new(a):
     if not gs:
         die("run `sif gen init` first")
     if state().get("frozen"):
-        die("loop is frozen; `sif unfreeze` to continue refining")
+        die("loop is frozen")
     last = gs[-1]
-    if not refine_score(last):
+    if not score_file(last, "refine"):
         die(f"{last} has no refine score yet")
     if not (ROOT / "lessons" / f"{last}.md").exists():
         die(f"lessons/{last}.md missing; run `sif diagnose {last}` and fill it in first")
     rows, best, stop = loop_status()
     if stop and not a.force:
-        die(f"stop rule hit ({stop}); run `sif freeze` (or --force)")
+        die(f"stop rule hit ({stop}); run `sif freeze`")
     parent = gname(a.parent) if a.parent else best
     new = f"gen-{int(last[4:]) + 1:02d}"
     g = ROOT / "generations" / new
-    shutil.copytree(ROOT / "generations" / parent / "skill", g / "skill")
-    (g / "GEN.json").write_text(json.dumps({"gen": new, "parent": parent, "created": now(),
-                                            "lessons_from": last, "note": a.note or ""}, indent=2) + "\n")
-    print(f"{new} created from {parent} (best so far). Edit generations/{new}/skill/, then `sif gen lint {new}`.")
+    shutil.copytree(ROOT / "generations" / parent / "skills", g / "skills")
+    (g / "GEN.json").write_text(json.dumps({"gen": new, "parent": parent, "created": now(), "lessons_from": last, "note": a.note or ""}, indent=2) + "\n")
+    print(f"{new} created from {parent} (best so far). Edit generations/{new}/skills/, then `sif gen lint {new}`.")
 
 
 def forbidden_tokens():
     toks = {}
-    base = "\n".join(p.read_text(errors="replace") for p in (ROOT / "generations" / "gen-00" / "skill").rglob("*") if p.is_file())
+    base = "\n".join(p.read_text(errors="replace") for p in (ROOT / "generations" / "gen-00" / "skills").rglob("*") if p.is_file())
     for s in SPLITS:
         for cid in cases(s):
             c, t = load_case(s, cid)
-            cand = {cid, c.get("cve") or "", t.get("fix_subject") or ""}
+            cand = {cid, c.get("cve") or "", t.get("fix_subject") or "", Path(c.get("source", {}).get("from", "")).name}
             for f in t["functions"]:
                 cand.update(n for n in f["names"] if len(n) >= 6)
-            cand.update(f for f in t["files"])
+            cand.update(n for n in (t.get("kasan") or {}).get("functions", []) if len(n) >= 6)
+            cand.update(t["files"])
             for tok in cand:
-                if tok and tok not in base:
+                if tok and len(tok) >= 4 and tok not in base:
                     toks[tok] = f"{s}/{cid}"
     return toks
 
 
 def cmd_gen_lint(a):
     g = gname(a.gen)
-    d = ROOT / "generations" / g / "skill"
-    if not (d / "SKILL.md").exists():
-        die(f"{g}: skill/SKILL.md missing")
+    d = ROOT / "generations" / g / "skills"
+    base = ROOT / "generations" / "gen-00" / "skills"
+    bad = []
+    for name, sc in skills_cfg().items():
+        sk = d / name
+        if not (sk / "SKILL.md").exists():
+            bad.append((name, "SKILL.md missing", "-")); continue
+        head = (sk / "SKILL.md").read_text().split("---")
+        if len(head) < 3 or f"name: {name}" not in head[1]:
+            bad.append((f"{name}/SKILL.md", "frontmatter name changed or missing", "-"))
+        for e in guard_errors(base / name, sk, sc["mode"]):
+            bad.append((name, e, "safety"))
+    extra = sorted(p.name for p in d.iterdir() if p.name not in skills_cfg())
+    if extra:
+        bad.append(("-", f"unexpected skill directories {extra}", "-"))
     text = {p: p.read_text(errors="replace") for p in d.rglob("*") if p.is_file()}
-    bad = [(p.relative_to(d), tok, src) for tok, src in forbidden_tokens().items() for p, t in text.items() if tok in t]
-    head = (d / "SKILL.md").read_text().split("---")
-    if len(head) < 3 or f"name: {CFG['target_skill']}" not in head[1]:
-        bad.append(("SKILL.md", "frontmatter name changed or missing", "-"))
+    bad += [(p.relative_to(d), tok, src) for tok, src in forbidden_tokens().items() for p, t in text.items() if tok in t]
     meta = gen_meta(g)
     if meta.get("parent"):
-        r = subprocess.run(["diff", "-ru", str(ROOT / "generations" / meta["parent"] / "skill"), str(d)],
-                           capture_output=True, text=True).stdout
+        r = subprocess.run(["diff", "-ru", str(ROOT / "generations" / meta["parent"] / "skills"), str(d)], capture_output=True, text=True).stdout
         add = len(re.findall(r"^\+(?!\+\+)", r, re.M)); rem = len(re.findall(r"^-(?!--)", r, re.M))
         print(f"{g} vs {meta['parent']}: +{add} -{rem} lines")
         if add + rem == 0:
@@ -427,36 +761,201 @@ def cmd_gen_lint(a):
     for f, tok, src in bad:
         print(f"LEAK/ERR {f}: {tok!r} (from {src})")
     if bad:
-        die("lint failed: generations must hold general procedure, never case-specific identifiers")
+        die("lint failed: generations hold general procedure only, and never touch the safety blocks")
     meta["skill_sha256"] = tree_sha(d); meta["linted"] = now()
     (ROOT / "generations" / g / "GEN.json").write_text(json.dumps(meta, indent=2) + "\n")
     print(f"{g}: lint ok, sha256={meta['skill_sha256'][:16]}")
 
 
-# ───────────────────────────── runs ─────────────────────────────
+# ───────────────────────────── VMs and PoCs ─────────────────────────────
 
-TASK = """# Task: file-guided static vulnerability detection (benchmark run)
+PROFILE_TMPL = """# Auto-generated by SKILL-SIF/bin/sif for one benchmark run; removed by sif.
+export ARCH=x86_64
+export LLVM=1
+export FS="$PRJ/{fs}"
+export KIMAGE="$PRJ/{root}/vmimg/{img}/bzImage"
+export SMP={smp}
+export MEM={mem}
+export NET_ISOLATED=1
+"""
 
-You are in an isolated benchmark workspace. Work ONLY inside this directory.
 
-- Skill under test: `./skill/SKILL.md` (with `./skill/references/`). Read it and follow its
-  procedure. Do NOT use the Skill tool or any other copy of a skill with the same name; this
-  local copy is the one being evaluated. Where it names subagent models or dispatches workers,
-  you may follow that; if dispatch is unavailable run the passes yourself.
-- Source tree: `./src` (Linux kernel source supplied for this case; it may be a partial tree). All `path:line` citations
-  are relative to `./src`.
-- Research directory for the skill's own records: `./agent/{cid}/`.
-- Scope: one known-vulnerable snapshot. The defect is in or reachable through these file(s);
-  you may read any other file under `./src`:
-{files}
-- Static analysis only. No network, no web search, no builds, no VMs, no PoC execution.
-  Do not read anything outside this directory.
-- Adapt the skill's scope steps to this setting: there is no kernel config, no kernelCTF
-  eligibility check, and no prior work; record those as not applicable instead of looking them up.
+def vmsh(*args, timeout=None):
+    try:
+        return subprocess.run([str(VM_SH), *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(e.cmd, 124, "", "timeout")
 
-## Required output
 
-Write `./out/report.json` (valid JSON, nothing else in the file):
+def make_profile(img, purpose):
+    name = f"sif-{rid()}"
+    d = PROFILES / name
+    d.mkdir()
+    (d / "profile.sh").write_text(PROFILE_TMPL.format(fs=CFG["guest_fs"], root=ROOT.name, img=img, smp=CFG["poc"]["smp"], mem=CFG["poc"]["mem"]))
+    update_state(lambda s: s.setdefault("profiles", {}).__setitem__(name, {"purpose": purpose, "created": now()}))
+    return name
+
+
+def remove_profile(name, logs_to=None):
+    """Kill and remove every VM of a sif profile (copying boot logs first), then the profile."""
+    if not name.startswith("sif-") or name not in state().get("profiles", {}):
+        return
+    d = PROFILES / name
+    for v in sorted((d / "vms").glob("*")) if (d / "vms").exists() else []:
+        vmsh("-p", name, "-v", v.name, "kill", timeout=60)
+        if logs_to and (v / "boot.log").exists():
+            Path(logs_to).mkdir(parents=True, exist_ok=True)
+            shutil.copy2(v / "boot.log", Path(logs_to) / f"{v.name}.boot.log")
+        vmsh("-p", name, "-v", v.name, "rm", timeout=60)
+    if (d / "vms").exists() and any((d / "vms").iterdir()):
+        print(f"warning: profile {name} still has VMs; left in place", file=sys.stderr)
+        return
+    shutil.rmtree(d, ignore_errors=True)
+    update_state(lambda s: s.get("profiles", {}).pop(name, None))
+
+
+KASAN_RE = re.compile(r"BUG: KASAN: ([\w-]+) in ([\w.]+)")
+FRAME_RE = re.compile(r"^(?:\[[^\]]*\]\s*)?\s*(?:\?\s*)?([A-Za-z_][\w.]*)\+0x[0-9a-f]+/0x[0-9a-f]+", re.M)
+NOISE = re.compile(r"^(dump_stack\w*|print_\w*report\w*|kasan_\w+|__kasan_\w+|__asan_\w+|check_region\w*|kasan|print_address_description\w*|"
+                   r"show_stack|__dump_stack|report_\w+|entry_SYSCALL\w*|do_syscall_64|x64_sys_call|ret_from_fork\w*)$")
+
+
+def base_name(f):
+    return re.sub(r"\.(isra|constprop|part|cold|llvm)(\.\d+)*$", "", re.sub(r"\.(isra|constprop|part)\.\d+", "", f))
+
+
+def kasan_report(text):
+    m = KASAN_RE.search(text)
+    if not m:
+        return None
+    seg = text[m.end(): m.end() + 12000].split("Allocated by task")[0].split("The buggy address")[0]
+    frames = [base_name(f) for f in FRAME_RE.findall(seg)]
+    frames = [f for f in frames if not NOISE.match(f)]
+    return {"type": m.group(1), "func": base_name(m.group(2)), "frames": frames[:20], "line": m.group(0)}
+
+
+def kasan_matches(rep, truth):
+    if not rep:
+        return False, "no KASAN report"
+    k = (truth or {}).get("kasan") or {}
+    want = set(k.get("functions") or [n for f in truth["functions"] for n in f["names"]])
+    if k.get("require_type") and rep["type"] != k.get("type"):
+        return False, f"KASAN type {rep['type']} != {k.get('type')}"
+    top = [rep["func"]] + rep["frames"][:CFG["poc"]["match_frames"]]
+    hit = sorted(want & set(top))
+    return (True, f"{rep['line']} (matched {hit})") if hit else (False, f"{rep['line']}: different location (top {top[:4]})")
+
+
+def build_poc(poc_dir, build):
+    if not (poc_dir / "poc.c").is_file():
+        return None, "no poc.c"
+    build.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(poc_dir / "poc.c", build / "poc.c")
+    libs = []
+    if (poc_dir / "ldlibs.txt").is_file():
+        for tok in (poc_dir / "ldlibs.txt").read_text().split():
+            if not re.fullmatch(r"-l[A-Za-z0-9_+-]+", tok):
+                return None, f"ldlibs.txt: rejected token {tok!r}"
+            libs.append(tok)
+    r = subprocess.run(CFG["poc"]["compile"] + libs, cwd=build, capture_output=True, text=True, timeout=180)
+    (build / "build.log").write_text(r.stdout + r.stderr)
+    if r.returncode or not (build / "poc").is_file():
+        return None, "compile failed: " + (r.stderr.strip().splitlines() or ["?"])[-1][:200]
+    return build / "poc", None
+
+
+def run_cfg(poc_dir):
+    rc = {"user": "root", "timeout_sec": CFG["poc"]["default_timeout_sec"]}
+    try:
+        rc.update(json.loads((poc_dir / "run.json").read_text()))
+    except Exception:
+        pass
+    if rc["user"] not in ("root", "nobody"):
+        rc["user"] = "root"
+    rc["timeout_sec"] = max(5, min(int(rc.get("timeout_sec") or 0) or CFG["poc"]["default_timeout_sec"], CFG["poc"]["max_timeout_sec"]))
+    return rc
+
+
+def poc_attempt(profile, binary, rc, logdir, tag):
+    """One fresh VM: boot, copy, run with a timeout, collect boot.log, kill, rm."""
+    vm = f"sif{tag}_{int(time.time())}{secrets.randbelow(1000):03d}"
+    r = vmsh("-p", profile, "run", vm, timeout=90)
+    if r.returncode:
+        return {"infra": f"boot: {(r.stderr or r.stdout).strip()[-200:]}"}
+    vdir = PROFILES / profile / "vms" / vm
+    out = {"vm": vm}
+    try:
+        deadline = time.time() + CFG["poc"]["boot_timeout_sec"]
+        while True:
+            r = vmsh("-p", profile, "-v", vm, "ssh", "--", "true", timeout=30)
+            if r.returncode == 0:
+                break
+            if r.returncode == 252 or time.time() > deadline:
+                return out | {"infra": f"ssh unavailable (rc={r.returncode})"}
+            time.sleep(5)
+        r = vmsh("-p", profile, "-v", vm, "scp", str(binary), "vm:/tmp/poc", timeout=120)
+        if r.returncode:
+            return out | {"infra": f"scp rc={r.returncode}"}
+        t = rc["timeout_sec"]
+        cmd = f"timeout -s KILL {t} /tmp/poc"
+        if rc["user"] == "nobody":
+            cmd = f"su nobody -s /bin/sh -c 'cd /tmp && {cmd}'"
+        r = vmsh("-p", profile, "-v", vm, "ssh", "--", f"chmod 755 /tmp/poc; cd /tmp; {cmd}", timeout=t + 90)
+        out["rc"] = r.returncode
+        time.sleep(4)
+    finally:
+        logdir.mkdir(parents=True, exist_ok=True)
+        if (vdir / "boot.log").exists():
+            shutil.copy2(vdir / "boot.log", logdir / f"{tag}.boot.log")
+            out["log"] = f"{tag}.boot.log"
+        vmsh("-p", profile, "-v", vm, "kill", timeout=60)
+        vmsh("-p", profile, "-v", vm, "rm", timeout=60)
+    return out
+
+
+def poc_score(case, poc_dir, outdir, truth, attempts):
+    """Build the PoC and run it on fresh VMs until a matching KASAN report appears
+    (truth=None: any KASAN report, used to verify a public PoC)."""
+    outdir = Path(outdir)
+    binary, err = build_poc(poc_dir, outdir / "build")
+    if err:
+        return {"ok": False, "note": err, "attempts": 0}
+    rc = run_cfg(poc_dir)
+    profile = make_profile(case["image"]["img"], f"score {case['id']}")
+    res = {"ok": False, "note": "", "attempts": 0, "user": rc["user"]}
+    try:
+        for i in range(1, attempts + 1):
+            for retry in range(CFG["poc"]["infra_retries"] + 1):
+                o = poc_attempt(profile, binary, rc, outdir, f"a{i}r{retry}")
+                if "infra" not in o:
+                    break
+            res["attempts"] = i
+            if "infra" in o:
+                res["note"] = "INFRA_BLOCKED: " + o["infra"]
+                continue
+            text = (outdir / o["log"]).read_text(errors="replace") if o.get("log") else ""
+            rep = kasan_report(text)
+            if truth is None:
+                if rep:
+                    return res | {"ok": True, "kasan": rep, "log": o["log"], "note": rep["line"]}
+                res["note"] = "no KASAN report"
+                continue
+            ok, note = kasan_matches(rep, truth)
+            res.update({"note": note, "log": o.get("log")})
+            if ok:
+                return res | {"ok": True, "kasan": rep}
+            if rep:
+                res["kasan"] = rep
+    finally:
+        remove_profile(profile)
+    return res
+
+
+# ───────────────────────────── run workspaces ─────────────────────────────
+
+PART1 = """## Part 1 — root cause (static)
+
+Find the defect and write `./out/report.json` (valid JSON, nothing else in the file):
 
 ```json
 {{"findings": [
@@ -468,65 +967,129 @@ Write `./out/report.json` (valid JSON, nothing else in the file):
 ]}}
 ```
 
-Also write `./out/worklog.md`, briefly and as you go: which functions you read, each
-hypothesis you formed, and for each one you dropped, the guard or reason that made you
-drop it (`path:line`). A later reader uses it to see where the procedure led you.
+At most {topk} findings, best first. `lines` must be the narrowest range (at most {maxr}
+lines) of the statement(s) responsible for the defect, not the whole function. An empty
+`findings` list is allowed when nothing survives falsification.
+"""
 
-At most {topk} findings, best first. `lines` must be the narrowest range (at most
-{maxr} lines) of the statement(s) responsible for the defect in `./src` as given,
-not the whole function. An empty `findings` list is allowed when nothing survives
-falsification.
+PART2 = """## Part 2 — KASAN reproducer
+
+Write a minimal reproducer that triggers the defect you reported in Part 1 and makes KASAN
+report it.
+
+- Source: `./out/poc/poc.c`, a single C file. The scorer builds it on the host exactly as
+  `{compile}` plus the libraries you list in `./out/poc/ldlibs.txt` (`-lname` tokens only).
+- Optional `./out/poc/run.json`: `{{"user": "root" | "nobody", "timeout_sec": <= {maxt}}}`
+  (default: root, {deft} s).
+- Test it yourself on a VM that boots a KASAN kernel matching `./src`. Run these from any
+  directory; they are the only VM commands you may use, and only with profile `{profile}`:
+
+  ```bash
+  /workspace/tools/vm.sh -p {profile} run {vmtag}_$(date +%s)
+  /workspace/tools/vm.sh -p {profile} -v <vm> ssh -- '<command>'
+  /workspace/tools/vm.sh -p {profile} -v <vm> scp ./out/poc/poc vm:/tmp/poc
+  /workspace/tools/vm.sh -p {profile} -v <vm> kill
+  /workspace/tools/vm.sh -p {profile} -v <vm> rm
+  ```
+
+  Wait for SSH after `run` (repeat `ssh -- true` until it returns 0). Read the console with
+  `cat` or `tail` on `/workspace/profiles/{profile}/vms/<vm>/boot.log`; do not use `vm.sh log`
+  (it never returns). `vm.sh ... gdb` on your own VM is allowed.
+- Build on the host (`gcc` in `./out/poc/`); run the binary ONLY inside the VM.
+- Budget: at most {boots} VM boots and {attempts} reproducer executions; one VM of yours at a
+  time. After a crash, kill and rm that VM and boot a new one. Before you finish, kill and rm
+  every VM you created.
+- The guest cannot reach any network; do not try.
+- Log every attempt in `./out/poc-runs.md`: what changed, the command, and the result (the
+  `BUG: KASAN:` line if any).
+- Success means a KASAN report caused by the root cause in Part 1; a crash anywhere else is
+  not success. The scorer re-runs your final `poc.c` on fresh VMs.
+"""
+
+TASK_HEAD = """# Task: kernel vulnerability benchmark run
+
+You are in an isolated benchmark workspace. Work ONLY inside this directory, plus the VM
+profile named in Part 2.
+
+## Inputs
+
+- Source: `./src`. It holds one subsystem of a Linux kernel tree, the headers that subsystem
+  includes, and the kernel config (`./src/.config`). All `path:line` citations are relative
+  to `./src`.
+- Subsystem in scope: {scope}. A real, known-to-be-triggerable memory-safety defect is in or
+  reachable through it. You may read any file under `./src`.
+- Research directory for your own records: `./agent/{rid}/`.
+{method}
+## Settings and rules
+
+- If you dispatch subagents, use `model: "opus"` and `effort: "{effort}"` for every one of
+  them. This overrides any model or effort table in a skill.
+- No network, no web search or fetch, no package installs. Do not read, list, or search
+  anything outside this workspace except your VM profile directory; never look at other
+  benchmark runs. Do not answer from memory of a particular CVE or patch: derive everything
+  from `./src` and your own experiments.
+- Also write `./out/worklog.md`, briefly and as you go: functions read, hypotheses formed,
+  and for each dropped hypothesis the guard or reason (`path:line`).
+
+"""
+
+METHOD_SKILL = """
+## Procedure under test
+
+- Part 1: follow `./skills/vuln-discovery/SKILL.md` and the files under its `references/`.
+- Part 2: follow §3 "Reproducer loop" and §4 "Causality" of
+  `./skills/dynamic-validation/SKILL.md`.
+- These local copies are what is being evaluated. Do not use the Skill tool or any other copy.
+  Where a skill's environment rules (scope record items such as rules lookups and prior work,
+  kernelCTF steps, profiles, artifact paths, official service) do not fit this workspace,
+  this task wins: record them as not applicable and continue.
+"""
+
+METHOD_CONTROL = """
+## Method
+
+Use your own approach. There is no procedure document for this task: do not use the Skill
+tool, and do not look for skill files or `.claude` directories.
 """
 
 
-def prep(g, split, cid, force=False):
+def prep_run(group, split, cid, k, force=False):
     c, _ = load_case(split, cid)
-    ws = ROOT / "runs" / g / split / cid
+    ws = run_dir(group, split, cid, k)
     if ws.exists():
         if (ws / "out" / "report.json").exists() and not force:
             return ws, False
+        old = json.loads((ws / "run.json").read_text()) if (ws / "run.json").exists() else {}
+        if old.get("profile"):
+            remove_profile(old["profile"], ws.parent / f"_old-r{k}-vmlogs")
         shutil.rmtree(ws)
     ws.mkdir(parents=True)
-    (ws / "out").mkdir(); (ws / "agent" / cid).mkdir(parents=True)
-    src = ws / "src"
-    subprocess.run(["cp", "-a", "--reflink=auto", str(ROOT / "cases" / split / cid / "src"), str(src)], check=True)
+    tag = f"r{rid(3)}"
+    (ws / "out" / "poc").mkdir(parents=True); (ws / "agent" / tag).mkdir(parents=True)
+    subprocess.run(["cp", "-a", "--reflink=auto", str(ROOT / "cases" / split / cid / "src"), str(ws / "src")], check=True)
     for ex in CFG["src_exclude"]:
-        shutil.rmtree(src / ex, ignore_errors=True)
-    shutil.copytree(ROOT / "generations" / g / "skill", ws / "skill")
-    for p in (ws / "skill").rglob("*.md"):  # make the skill's absolute paths point at this workspace
-        t = p.read_text()
-        t2 = t.replace(f"/workspace/.claude/skills/{CFG['target_skill']}", str(ws / "skill")).replace("/workspace/agent/", str(ws / "agent") + "/")
-        if t2 != t:
-            p.write_text(t2)
-    (ws / "task.md").write_text(TASK.format(cid=cid, topk=CFG["topk"], maxr=CFG["max_range_lines"],
-                                            files="\n".join(f"  - `{f}`" for f in c["target_files"])))
+        shutil.rmtree(ws / "src" / ex, ignore_errors=True)
+    if group != CONTROL:
+        shutil.copytree(ROOT / "generations" / group / "skills", ws / "skills")
+        for p in (ws / "skills").rglob("*.md"):
+            t = p.read_text()
+            t2 = t.replace("/workspace/agent/", str(ws / "agent") + "/")
+            for name in skills_cfg():
+                t2 = t2.replace(f"/workspace/.claude/skills/{name}", str(ws / "skills" / name))
+            if t2 != t:
+                p.write_text(t2)
+    profile = make_profile(c["image"]["img"], f"detect {group} {split} {cid} r{k}") if CFG["poc"]["enabled"] else None
+    P = CFG["poc"]
+    text = TASK_HEAD.format(scope=", ".join(f"`{s}/`" for s in c["scope"]), rid=tag, effort=CFG["effort"],
+                            method=METHOD_CONTROL if group == CONTROL else METHOD_SKILL)
+    text += PART1.format(topk=CFG["topk"], maxr=CFG["max_range_lines"])
+    if profile:
+        text += "\n" + PART2.format(compile=" ".join(P["compile"]), maxt=P["max_timeout_sec"], deft=P["default_timeout_sec"],
+                                    profile=profile, vmtag=tag, boots=P["detector_max_boots"], attempts=P["detector_max_attempts"])
+    (ws / "task.md").write_text(text)
+    (ws / "run.json").write_text(json.dumps({"group": group, "split": split, "case": cid, "run": k, "tag": tag, "profile": profile,
+                                             "prepared": now(), "settings": settings()}, indent=2) + "\n")
     return ws, True
-
-
-def run_cmd(ws):
-    cmd = ["claude", "-p", (ws / "task.md").read_text(), "--output-format", "stream-json", "--verbose", *CFG["claude_args"]]
-    if CFG.get("model"):
-        cmd += ["--model", CFG["model"]]
-    return cmd
-
-
-def run_one(g, split, cid, ws, fresh, a):
-    if not fresh:
-        return cid, "skip (report exists)"
-    if a.prep_only:
-        return cid, f"prepared {ws.relative_to(ROOT)}"
-    t0 = datetime.datetime.now()
-    try:
-        with open(ws / "trajectory.jsonl", "w") as out, open(ws / "stderr.log", "w") as err:
-            rc = subprocess.run(run_cmd(ws), cwd=ws, stdout=out, stderr=err, timeout=CFG["run_timeout_sec"]).returncode
-    except subprocess.TimeoutExpired:
-        rc = "timeout"
-    (ws / "run.json").write_text(json.dumps({"gen": g, "case": cid, "split": split, "rc": rc, "started": t0.astimezone().isoformat(timespec="seconds"),
-                                             "seconds": int((datetime.datetime.now() - t0).total_seconds()),
-                                             "model": CFG.get("model")}, indent=2) + "\n")
-    if not a.keep_src:
-        shutil.rmtree(ws / "src", ignore_errors=True)
-    return cid, f"rc={rc} report={'yes' if (ws / 'out' / 'report.json').exists() else 'NO'}"
 
 
 DISPATCH = """You are a {role} subagent of the SKILL-SIF loop.
@@ -537,77 +1100,123 @@ read and write only inside the paths that role file allows; do not spawn further
 outside your workspace. Return only the short hand-back that the role file specifies."""
 
 
-def cmd_dispatch(a):
-    """Prepare workspaces and print one ready-to-send Agent prompt per case."""
-    g = gname(a.gen)
-    out = []
-    if a.role == "detector":
-        guard_split(g, a.split)
-        if gen_meta(g).get("parent") and not gen_meta(g).get("linted"):
-            die(f"{g} not linted; run `sif gen lint {g}`")
-        ids = a.cases or cases(a.split)
-        guard_ready(a.split, ids)
-        for cid in ids:
-            ws, fresh = prep(g, a.split, cid, a.force)
-            if not fresh:
-                continue  # report already exists
-            out.append({"case": cid, "description": f"SIF detect {g} {cid}"[:60], "model": CFG.get("detector_model"),
-                        "prompt": DISPATCH.format(role="detector", root=ROOT, ws=ws, extra="")})
-    else:
-        sc = refine_score(g)
-        if not sc:
-            die(f"{g} has no refine score; diagnosis uses the refine split only")
-        for cid, r in sc["cases"].items():
-            ws = ROOT / "runs" / g / "refine" / cid
-            if r["verdict"] == "full" or (a.cases and cid not in a.cases) or ((ws / "diagnosis.json").exists() and not a.force):
-                continue
-            extra = (f"Case ground truth (read-only): {ROOT / 'cases' / 'refine' / cid}\n"
-                     f"Score for this run: cwe={r['cwe']} function={r['function']} statement={r['statement']} ({r['note']})\n")
-            out.append({"case": cid, "description": f"SIF diagnose {g} {cid}"[:60], "model": CFG.get("diagnoser_model"),
-                        "prompt": DISPATCH.format(role="diagnoser", root=ROOT, ws=ws, extra=extra)})
-    if a.role == "detector":
-        lock_answers()
-    print(json.dumps(out, indent=2, ensure_ascii=False))
-    print(f"{len(out)} {a.role} dispatch(es) for {g}" + ("; inbox/ and cases/ are now locked until `sif score`" if a.role == "detector" else ""), file=sys.stderr)
-
-
 def guard_ready(split, ids):
     bad = []
     for cid in ids:
-        _, t = load_case(split, cid)
-        if not t.get("statements") or t.get("reviewed") is not True:
+        c, t = load_case(split, cid)
+        if not t.get("statements") or t.get("reviewed") is not True or (CFG["poc"]["enabled"] and c.get("verified") is not True):
             bad.append(cid)
     if bad:
-        die(f"truth not ready (empty or \"reviewed\" is not true) for: {bad}")
+        die(f"cases not ready (truth not reviewed, or public PoC not verified): {bad}")
 
 
 def guard_split(g, split):
     fz = state().get("frozen")
-    if split == "test" and not (fz and g in (fz, "gen-00")):
-        die("the test split is locked until `sif freeze`; then only the frozen generation and gen-00 may use it")
+    if split == "test" and not (fz and g in (fz, "gen-00", CONTROL)):
+        die("the test split is locked until `sif freeze`; then only the frozen generation, gen-00, and control may use it")
+
+
+def contaminated_runs(group, split):
+    sc = score_file(group, split)
+    out = []
+    for cid, r in (sc or {}).get("cases", {}).items():
+        for k, x in r["runs"].items():
+            if x.get("contaminated") and not (run_dir(group, split, cid, int(k[1:])) / "RETRIED").exists():
+                out.append((cid, int(k[1:])))
+    return out
+
+
+def cmd_dispatch(a):
+    """Prepare workspaces and print one ready-to-send Agent prompt per run (JSON)."""
+    out = []
+    if a.role in ("detector", CONTROL):
+        g = CONTROL if a.role == CONTROL else gname(a.gen)
+        guard_split(g, a.split)
+        if g != CONTROL:
+            if not (ROOT / "generations" / g).exists():
+                die(f"no {g}")
+            if not gen_meta(g).get("linted"):
+                die(f"{g} not linted; run `sif gen lint {g}`")
+        ids = a.cases or cases(a.split)
+        if not ids:
+            die(f"no cases in split {a.split}")
+        guard_ready(a.split, ids)
+        todo = [(cid, k, False) for cid in ids for k in range(1, nruns() + 1)]
+        if a.retry_contaminated:
+            todo = [(cid, k, True) for cid, k in contaminated_runs(g, a.split)]
+        role = "control" if g == CONTROL else "detector"
+        for cid, k, force in todo:
+            ws, fresh = prep_run(g, a.split, cid, k, force or a.force)
+            if force:
+                (ws / "RETRIED").write_text(now() + "\n")
+            if not fresh:
+                continue
+            out.append({"run": f"{cid}/r{k}", "description": f"SIF {role} {g} {cid} r{k}"[:60],
+                        "model": CFG["detector_model"], "effort": CFG["effort"],
+                        "prompt": DISPATCH.format(role=role, root=ROOT, ws=ws, extra="")})
+        if out:
+            lock(g, g, a.split)
+    else:
+        g = gname(a.gen)
+        sc = score_file(g, "refine")
+        if not sc:
+            die(f"{g} has no refine score; diagnosis uses the refine split only")
+        for cid, r in sc["cases"].items():
+            ws = ROOT / "runs" / g / "refine" / cid
+            if not r["needs_diagnosis"] or (a.cases and cid not in a.cases) or ((ws / "diagnosis.json").exists() and not a.force):
+                continue
+            lines = "\n".join(f"  {k}: cwe={x['cwe']} function={x['function']} statement={x['statement']} ({x['note']}); "
+                              f"poc={'ok' if x['poc']['ok'] else 'FAIL'} ({x['poc'].get('note', '')[:120]})" for k, x in r["runs"].items())
+            ctrl = r.get("control") or {}
+            extra = (f"Case ground truth (read-only): {ROOT / 'cases' / 'refine' / cid}\n"
+                     f"Runs of this case: {', '.join(str(ws / k) for k in r['runs'])}\n"
+                     f"Scores per run:\n{lines}\n"
+                     f"Control group (no skill) on this case: rc_rate={ctrl.get('rc_rate')} poc_rate={ctrl.get('poc_rate')}\n")
+            out.append({"case": cid, "description": f"SIF diagnose {g} {cid}"[:60], "model": CFG["diagnoser_model"], "effort": CFG["effort"],
+                        "prompt": DISPATCH.format(role="diagnoser", root=ROOT, ws=ws, extra=extra)})
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    n = CFG["budget"]["max_parallel_agents"]
+    msg = f"{len(out)} {a.role} dispatch(es); send them in batches of at most {n} (Agent tool: subagent_type general-purpose, the printed model and effort)"
+    if a.role != "diagnoser" and out:
+        msg += "; answers, generations, and live skills are locked until `sif score`"
+    print(msg, file=sys.stderr)
+
+
+def run_cmd(ws, group):
+    args = list(CFG["claude_args"])
+    cmd = ["claude", "-p", (ws / "task.md").read_text(), "--output-format", "stream-json", "--verbose", *args,
+           "--model", CFG["model_id"], "--effort", CFG["effort"]]
+    return cmd
+
+
+def run_one(group, split, cid, k, ws, fresh, a):
+    if not fresh:
+        return f"{cid}/r{k}", "skip (report exists)"
+    t0 = datetime.datetime.now()
+    try:
+        with open(ws / "trajectory.jsonl", "w") as out, open(ws / "stderr.log", "w") as err:
+            rc = subprocess.run(run_cmd(ws, group), cwd=ws, stdout=out, stderr=err, timeout=CFG["run_timeout_sec"]).returncode
+    except subprocess.TimeoutExpired:
+        rc = "timeout"
+    meta = json.loads((ws / "run.json").read_text())
+    meta.update({"rc": rc, "started": t0.astimezone().isoformat(timespec="seconds"), "seconds": int((datetime.datetime.now() - t0).total_seconds())})
+    (ws / "run.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return f"{cid}/r{k}", f"rc={rc} report={'yes' if (ws / 'out' / 'report.json').exists() else 'NO'}"
 
 
 def cmd_run(a):
-    g = gname(a.gen)
+    """Non-interactive mode: one `claude -p` per run, instead of Agent-tool dispatch."""
+    g = CONTROL if a.gen == CONTROL else gname(a.gen)
     guard_split(g, a.split)
-    if not (ROOT / "generations" / g).exists():
-        die(f"no {g}")
-    if gen_meta(g).get("parent") and not gen_meta(g).get("linted"):
-        die(f"{g} not linted; run `sif gen lint {g}`")
+    if g != CONTROL and not gen_meta(g).get("linted"):
+        die(f"{g} not linted")
     ids = a.cases or cases(a.split)
-    if not ids:
-        die(f"no cases in split {a.split}")
-    if a.dry_run:
-        print(f"would run {len(ids)} case(s) of {a.split} on {g}; per case, in runs/{g}/{a.split}/<case>/:")
-        print("  claude -p \"$(cat task.md)\" --output-format stream-json --verbose " + " ".join(CFG["claude_args"]))
-        return
     guard_ready(a.split, ids)
-    todo = [(cid, *prep(g, a.split, cid, a.force)) for cid in ids]
-    if not a.prep_only:
-        lock_answers()
-    with ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        for cid, msg in ex.map(lambda t: run_one(g, a.split, t[0], t[1], t[2], a), todo):
-            print(f"{g} {a.split}/{cid}: {msg}", flush=True)
+    todo = [(cid, k, *prep_run(g, a.split, cid, k, a.force)) for cid in ids for k in range(1, nruns() + 1)]
+    lock(g, g, a.split)
+    with ThreadPoolExecutor(max_workers=min(a.jobs, CFG["budget"]["max_parallel_agents"])) as ex:
+        for name, msg in ex.map(lambda t: run_one(g, a.split, *t, a), todo):
+            print(f"{g} {a.split}/{name}: {msg}", flush=True)
 
 
 # ──────────────────────────── scoring ────────────────────────────
@@ -620,7 +1229,7 @@ def norm_path(p):
     return p
 
 
-def score_case(case, truth, report):
+def score_report(case, truth, report):
     res = {"verdict": "incorrect", "cwe": False, "function": False, "statement": False, "note": ""}
     if report is None:
         res["note"] = "no_report"
@@ -658,102 +1267,248 @@ def score_case(case, truth, report):
     return res
 
 
+ANSWER_PATHS = re.compile(r"SKILL-SIF/(inbox|cases|lessons|scores|generations|archive|vmimg)\b|\.claude/skills|sol\.md|truth\.json")
+RUN_PATHS = re.compile(r"SKILL-SIF/runs/[^\s'\"`),\]]+")
+VMP = re.compile(r"vm\.sh\s+-p\s+([A-Za-z0-9._-]+)")
+
+
+def contamination(ws, group, profile):
+    """Evidence that a run read answers, other runs, skills it must not see, or other
+    VM profiles. Looks at the trajectory (run mode) and every text the run wrote."""
+    texts = []
+    for p in [ws / "trajectory.jsonl", *[q for q in (ws / "out").rglob("*") if q.is_file()], *[q for q in (ws / "agent").rglob("*") if q.is_file()]]:
+        if p.is_file() and p.stat().st_size < 20_000_000 and p.suffix not in ("", ".o") and p.name != "poc":
+            texts.append(p.read_text(errors="replace"))
+    t = "\n".join(texts)
+    own = str(ws.relative_to(ROOT.parent))
+    why = []
+    if ANSWER_PATHS.search(t):
+        why.append(f"answer/skill path: {ANSWER_PATHS.search(t).group(0)}")
+    for m in RUN_PATHS.findall(t):
+        if not m.startswith(own):
+            why.append(f"other run: {m}"); break
+    for m in VMP.findall(t):
+        if m != profile and m not in ("<profile>", "{profile}"):
+            why.append(f"other VM profile: {m}"); break
+    if group == CONTROL and re.search(r"skills/(vuln-discovery|dynamic-validation)|SKILL\.md", t):
+        why.append("control run refers to a skill file")
+    return why
+
+
+def score_group(group, split, do_poc):
+    per = {}
+    work = []
+    for cid in cases(split):
+        c, t = load_case(split, cid)
+        runs = {}
+        for k in range(1, nruns() + 1):
+            ws = run_dir(group, split, cid, k)
+            rp = ws / "out" / "report.json"
+            rep = None
+            if rp.exists():
+                try:
+                    rep = json.loads(rp.read_text())
+                except Exception:
+                    rep = {}
+            x = score_report(c, t, rep) if ws.exists() else {"verdict": "incorrect", "cwe": False, "function": False, "statement": False, "note": "not_run"}
+            meta = json.loads((ws / "run.json").read_text()) if (ws / "run.json").exists() else {}
+            if meta.get("profile"):
+                remove_profile(meta["profile"], ws / "vmlogs")
+            why = contamination(ws, group, meta.get("profile")) if ws.exists() else []
+            if why:
+                x.update({"verdict": "incorrect", "cwe": False, "function": False, "statement": False, "note": "contaminated: " + "; ".join(why)})
+                x["contaminated"] = True
+            x["poc"] = {"ok": False, "note": "not scored"}
+            runs[f"r{k}"] = x
+            if do_poc and ws.exists() and not why:
+                work.append((cid, k, c, t, ws))
+        per[cid] = {"cwe_class": c["cwe"], "runs": runs}
+
+    def poc_job(item):
+        cid, k, c, t, ws = item
+        poc = ws / "out" / "poc"
+        cache = ws / "score" / "poc.json"
+        sha = file_sha(poc / "poc.c") if (poc / "poc.c").is_file() else None
+        if cache.exists():
+            old = json.loads(cache.read_text())
+            if old.get("poc_sha256") == sha and not str(old.get("note", "")).startswith("INFRA_BLOCKED"):
+                return cid, k, old
+        if not sha:
+            r = {"ok": False, "note": "no poc.c", "poc_sha256": None}
+        else:
+            r = poc_score(c, poc, ws / "score", t, CFG["poc"]["score_attempts"]) | {"poc_sha256": sha}
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(r, indent=2) + "\n")
+        return cid, k, r
+    if work:
+        print(f"PoC scoring: {len(work)} run(s), up to {CFG['budget']['max_parallel_vms']} VMs at a time", file=sys.stderr)
+        with ThreadPoolExecutor(max_workers=CFG["budget"]["max_parallel_vms"]) as ex:
+            for cid, k, r in ex.map(poc_job, work):
+                per[cid]["runs"][f"r{k}"]["poc"] = r
+                print(f"  {cid}/r{k}: poc {'OK' if r['ok'] else 'fail'} — {r.get('note', '')[:100]}", file=sys.stderr)
+    maj = CFG["majority"]
+    for cid, r in per.items():
+        rs = list(r["runs"].values())
+        full = sum(1 for x in rs if x["verdict"] == "full")
+        poc = sum(1 for x in rs if x["poc"]["ok"])
+        r.update({"full_runs": full, "poc_runs": poc, "rc_rate": round(full / len(rs), 4), "poc_rate": round(poc / len(rs), 4),
+                  "full_majority": full >= maj, "poc_majority": poc >= maj})
+        r["needs_diagnosis"] = (len(rs) - full) >= maj or (do_poc and (len(rs) - poc) >= maj)
+    return per
+
+
+def summarize(per, ctrl):
+    n = len(per) or 1
+    s = {"cases": len(per), "runs": sum(len(r["runs"]) for r in per.values()),
+         "rc_rate": round(sum(r["rc_rate"] for r in per.values()) / n, 4),
+         "poc_rate": round(sum(r["poc_rate"] for r in per.values()) / n, 4),
+         "full_cases": sum(1 for r in per.values() if r["full_majority"]),
+         "poc_cases": sum(1 for r in per.values() if r["poc_majority"]),
+         "contaminated": sorted(f"{c}/{k}" for c, r in per.items() for k, x in r["runs"].items() if x.get("contaminated"))}
+    s["combined"] = round((s["rc_rate"] + s["poc_rate"]) / 2, 4) if CFG["poc"]["enabled"] else s["rc_rate"]
+    if ctrl:
+        th = CFG["memorized_threshold"]
+        for cid, r in per.items():
+            cr = ctrl["cases"].get(cid)
+            if cr:
+                r["control"] = {"rc_rate": cr["rc_rate"], "poc_rate": cr["poc_rate"]}
+                r["memorized_likely"] = cr["rc_rate"] >= th
+        have = [c for c in per if c in ctrl["cases"]]
+        if have:
+            m = len(have)
+            s["control_rc_rate"] = round(sum(ctrl["cases"][c]["rc_rate"] for c in have) / m, 4)
+            s["control_poc_rate"] = round(sum(ctrl["cases"][c]["poc_rate"] for c in have) / m, 4)
+            s["treat_rc_rate_on_controlled"] = round(sum(per[c]["rc_rate"] for c in have) / m, 4)
+            s["treat_poc_rate_on_controlled"] = round(sum(per[c]["poc_rate"] for c in have) / m, 4)
+            s["effect_rc"] = round(s["treat_rc_rate_on_controlled"] - s["control_rc_rate"], 4)
+            s["effect_poc"] = round(s["treat_poc_rate_on_controlled"] - s["control_poc_rate"], 4)
+            s["effect_combined"] = round((s["effect_rc"] + s["effect_poc"]) / 2, 4) if CFG["poc"]["enabled"] else s["effect_rc"]
+            s["control_cases"] = m
+            clean = [c for c in have if not per[c].get("memorized_likely")]
+            s["memorized_likely"] = sorted(set(have) - set(clean))
+            if clean:
+                s["clean_rc_rate"] = round(sum(per[c]["rc_rate"] for c in clean) / len(clean), 4)
+                s["clean_poc_rate"] = round(sum(per[c]["poc_rate"] for c in clean) / len(clean), 4)
+    return s
+
+
 def cmd_score(a):
-    g = gname(a.gen)
+    g = CONTROL if a.gen == CONTROL else gname(a.gen)
+    ph = phase()
+    if ph and ph["kind"] == g and ph["split"] == a.split:
+        unlock_all()
+    elif ph:
+        die(f"the open detection phase is {ph['kind']} {ph['split']}; score that one")
     guard_split(g, a.split)
     guard_ready(a.split, cases(a.split))
-    per = {}
-    for cid in cases(a.split):
-        c, t = load_case(a.split, cid)
-        rp = ROOT / "runs" / g / a.split / cid / "out" / "report.json"
-        rep = None
-        if rp.exists():
-            try:
-                rep = json.loads(rp.read_text())
-            except Exception:
-                rep = {}
-        per[cid] = score_case(c, t, rep) | {"cwe_class": c["cwe"]}
-        tj = rp.parent.parent / "trajectory.jsonl"
-        if tj.exists() and re.search(r"SKILL-SIF/(inbox|cases|lessons|scores|generations)", tj.read_text(errors="replace")):
-            per[cid].update({"verdict": "incorrect", "cwe": False, "function": False, "statement": False,
-                             "note": "contaminated: run touched answer paths"})
-    n = len(per) or 1
-    summ = {k: sum(1 for r in per.values() if r["verdict"] == k) for k in ("full", "partial", "incorrect")}
-    summ.update({f"{k}_ok": sum(1 for r in per.values() if r[k]) for k in ("cwe", "function", "statement")})
-    summ["cases"] = len(per); summ["full_rate"] = round(summ["full"] / n, 4)
-    out = {"gen": g, "split": a.split, "scored": now(), "skill_sha256": tree_sha(ROOT / "generations" / g / "skill"),
-           "config": {k: CFG[k] for k in ("topk", "line_tolerance", "max_range_lines", "model")}, "summary": summ, "cases": per}
-    parent = gen_meta(g).get("parent")
-    pp = ROOT / "scores" / f"{parent}.{a.split}.json" if parent else None
-    if pp and pp.exists():
-        prev = json.loads(pp.read_text())["cases"]
-        out["vs_parent"] = {"parent": parent,
-                            "gained": sorted(c for c, r in per.items() if r["verdict"] == "full" and prev.get(c, {}).get("verdict") != "full"),
-                            "lost": sorted(c for c, r in per.items() if r["verdict"] != "full" and prev.get(c, {}).get("verdict") == "full")}
+    per = score_group(g, a.split, CFG["poc"]["enabled"] and not a.no_poc)
+    ctrl = score_file(CONTROL, a.split) if g != CONTROL else None
+    summ = summarize(per, ctrl)
+    out = {"group": g, "split": a.split, "scored": now(), "settings": settings(),
+           "config": {k: CFG[k] for k in ("topk", "line_tolerance", "max_range_lines", "majority")}, "summary": summ, "cases": per}
+    if g != CONTROL:
+        out["skill_sha256"] = tree_sha(ROOT / "generations" / g / "skills")
+        parent = gen_meta(g).get("parent")
+        prev = score_file(parent, a.split) if parent else None
+        if prev:
+            pc = prev["cases"]
+            ok = lambda r: r["full_majority"] and (r["poc_majority"] or not CFG["poc"]["enabled"])
+            out["vs_parent"] = {"parent": parent,
+                                "gained": sorted(c for c, r in per.items() if ok(r) and not (c in pc and ok(pc[c]))),
+                                "lost": sorted(c for c, r in per.items() if not ok(r) and c in pc and ok(pc[c])),
+                                "delta_combined": round(summ["combined"] - prev["summary"]["combined"], 4)}
     (ROOT / "scores" / f"{g}.{a.split}.json").write_text(json.dumps(out, indent=2) + "\n")
-    print(f"{g} [{a.split}] full={summ['full']}/{summ['cases']} ({summ['full_rate']:.1%}) partial={summ['partial']} "
-          f"incorrect={summ['incorrect']} | cwe={summ['cwe_ok']} func={summ['function_ok']} stmt={summ['statement_ok']}")
+    print(f"{g} [{a.split}] rc_rate={summ['rc_rate']:.1%} poc_rate={summ['poc_rate']:.1%} combined={summ['combined']:.3f} "
+          f"full_cases={summ['full_cases']}/{summ['cases']} poc_cases={summ['poc_cases']}/{summ['cases']}")
+    if "effect_rc" in summ:
+        print(f"  vs control ({summ['control_cases']} case(s)): effect rc={summ['effect_rc']:+.1%} poc={summ['effect_poc']:+.1%}; "
+              f"memorized-likely: {summ['memorized_likely'] or 'none'}")
+    if summ["contaminated"]:
+        print(f"  contaminated runs (re-dispatch once with --retry-contaminated): {summ['contaminated']}")
     if "vs_parent" in out:
         v = out["vs_parent"]
-        print(f"  vs {v['parent']}: +G={len(v['gained'])} {v['gained']}  -L={len(v['lost'])} {v['lost']}")
+        print(f"  vs {v['parent']}: Δcombined={v['delta_combined']:+.3f} +G={v['gained']} -L={v['lost']}")
 
 
 def cmd_diagnose(a):
     g = gname(a.gen)
-    sc = refine_score(g)
+    sc = score_file(g, "refine")
     if not sc:
-        die(f"{g} has no refine score (diagnosis uses the refine split only; the test split is never diagnosed)")
+        die(f"{g} has no refine score")
     dst = ROOT / "lessons" / f"{g}.md"
     if dst.exists() and not a.force:
         die(f"{dst.relative_to(ROOT)} exists (--force to regenerate)")
+    S = sc["summary"]
     L = [f"# Failure lessons — {g} (refine split)", "",
-         f"Score: full {sc['summary']['full']}/{sc['summary']['cases']}, partial {sc['summary']['partial']}, incorrect {sc['summary']['incorrect']}.",
-         "", "Fill in each failed case from its trajectory and records, then aggregate. Codes are in",
-         "`docs/failure-taxonomy.md`. Lessons must be procedural and general: never name a case's",
-         "CVE, file, function, or fix (`sif gen lint` rejects generations that do).", "", "## Failed cases", "",
-         "| Case | CWE | cwe/func/stmt | Note | Mechanism (M*) | Skill limitation (S*) | What the run actually did |",
-         "|---|---|---|---|---|---|---|"]
+         f"Score: rc_rate {S['rc_rate']:.1%}, poc_rate {S['poc_rate']:.1%}, combined {S['combined']:.3f}; "
+         f"full cases {S['full_cases']}/{S['cases']}, PoC cases {S['poc_cases']}/{S['cases']} ({nruns()} runs per case).",
+         f"Control: rc {S.get('control_rc_rate')}, poc {S.get('control_poc_rate')}; effect rc {S.get('effect_rc')}, poc {S.get('effect_poc')}; "
+         f"memorized-likely cases: {S.get('memorized_likely') or 'none'} (weigh their lessons down).", "",
+         "Only failures that repeat (in at least the majority of a case's runs, or across cases) become lessons.",
+         "Codes are in `docs/failure-taxonomy.md`. Lessons are procedural and general: never name a case's CVE, file,",
+         "function, or fix (`sif gen lint` rejects generations that do).", "", "## Failed cases", "",
+         "| Case | CWE | full runs | PoC runs | control rc/poc | memorized? | Mechanism (M*) | Skill limitation (S*) | Repeats? | What the runs did |",
+         "|---|---|---|---|---|---|---|---|---|---|"]
     for cid, r in sc["cases"].items():
-        if r["verdict"] != "full":
-            d = {}
-            dp = ROOT / "runs" / g / "refine" / cid / "diagnosis.json"
-            if dp.exists():
-                try:
-                    d = json.loads(dp.read_text())
-                except Exception:
-                    d = {"did": "diagnosis.json malformed"}
-            cell = lambda k: str(d.get(k) or "TODO").replace("|", "/").replace("\n", " ")
-            L.append(f"| {cid} | {r['cwe_class']} | {'Y' if r['cwe'] else 'n'}/{'Y' if r['function'] else 'n'}/{'Y' if r['statement'] else 'n'} | {r['note']} | {cell('mechanism')} | {cell('limitation')} | {cell('did')} |")
-    if "vs_parent" in sc and sc["vs_parent"]["lost"]:
+        if not r["needs_diagnosis"]:
+            continue
+        d = {}
+        dp = ROOT / "runs" / g / "refine" / cid / "diagnosis.json"
+        if dp.exists():
+            try:
+                d = json.loads(dp.read_text())
+            except Exception:
+                d = {"did": "diagnosis.json malformed"}
+        cell = lambda k: str(d.get(k) or "TODO").replace("|", "/").replace("\n", " ")
+        ctl = r.get("control") or {}
+        L.append(f"| {cid} | {r['cwe_class']} | {r['full_runs']}/{len(r['runs'])} | {r['poc_runs']}/{len(r['runs'])} | "
+                 f"{ctl.get('rc_rate', '-')}/{ctl.get('poc_rate', '-')} | {'yes' if r.get('memorized_likely') else 'no'} | "
+                 f"{cell('mechanism')} | {cell('limitation')} | {cell('repeats')} | {cell('did')} |")
+    if sc.get("vs_parent", {}).get("lost"):
         L += ["", f"## Regressions vs {sc['vs_parent']['parent']} (−L) — explain each before editing", ""] + [f"- {c}: TODO" for c in sc["vs_parent"]["lost"]]
     L += ["", "## Aggregated lessons", "",
-          "| # | Lesson (general, procedural) | Supporting cases (count) | Codes | Proposed edit (file § section) |",
+          "| # | Lesson (general, procedural) | Supporting cases (count, runs) | Codes | Proposed edit (skill / file § section) |",
           "|---|---|---|---|---|", "| 1 | TODO | | | |", "",
           "## Edit plan for the next generation", "",
           "- One targeted procedural edit per lesson; prefer changing or replacing text over appending.",
-          "- Lessons supported by a single case are recorded but not applied.", ""]
+          "- A lesson needs two or more supporting cases, or one case whose failure repeats in the majority of its runs plus a regression it explains.",
+          "- dynamic-validation: only the text inside its sif:editable block (§3–§4) may change.", ""]
     dst.write_text("\n".join(L))
-    print(f"wrote {dst.relative_to(ROOT)}; evidence: runs/{g}/refine/<case>/{{trajectory.jsonl,out/,agent/}}")
+    print(f"wrote {dst.relative_to(ROOT)}")
 
 
 def cmd_status(a):
     rows, best, stop = loop_status()
     s = state()
-    cs = "LOCKED (detectors running; `sif score` reopens)" if locked("cases") else f"refine={len(cases('refine'))} test={len(cases('test'))}"
-    print(f"target skill: {CFG['target_skill']}   cases: {cs}   inbox: {'locked' if locked('inbox') else 'open'}   frozen: {s.get('frozen')}")
+    ph = s.get("phase")
+    print(f"target skills: {list(skills_cfg())}   settings: {settings()}")
+    if ph:
+        print(f"PHASE OPEN: {ph['kind']} on {ph['split']} since {ph['since']} — locked: {len(ph['locked'])} path(s); `sif score {ph['kind']} --split {ph['split']}` closes it")
+    else:
+        print(f"cases: refine={len(cases('refine'))} test={len(cases('test'))}   frozen: {s.get('frozen')}   promoted: {(s.get('promoted') or {}).get('gen')}")
+    for sp in SPLITS:
+        c = None if ph else score_file(CONTROL, sp)
+        if c:
+            print(f"  control [{sp}]: rc_rate={c['summary']['rc_rate']:.1%} poc_rate={c['summary']['poc_rate']:.1%}")
     for g, parent, sc in rows:
         if sc:
             m = sc["summary"]; v = sc.get("vs_parent", {})
-            line = f"full={m['full']}/{m['cases']} partial={m['partial']} +G={len(v.get('gained', []))} -L={len(v.get('lost', []))}"
+            line = (f"combined={m['combined']:.3f} rc={m['rc_rate']:.1%} poc={m['poc_rate']:.1%} effect_rc={m.get('effect_rc', '-')} "
+                    f"+G={len(v.get('gained', []))} -L={len(v.get('lost', []))}")
         else:
             line = "not scored"
-        t = ROOT / "scores" / f"{g}.test.json"
-        if t.exists():
-            tm = json.loads(t.read_text())["summary"]; line += f" | test full={tm['full']}/{tm['cases']}"
+        t = None if ph else score_file(g, "test")
+        if t:
+            line += f" | test combined={t['summary']['combined']:.3f}"
         print(f"  {g} (parent {parent or '-'}){' *best' if g == best else ''}: {line}")
     print(f"stop rule: {stop or 'continue'}")
-    if s.get("base_sha256") and live_skill().exists() and tree_sha(live_skill()) != s["base_sha256"]:
-        print("note: live skill differs from the gen-00 baseline (it changed outside this loop, or was promoted)")
+    b = CFG["budget"]
+    print(f"budget: disk {disk_gb()}/{b['max_disk_gb']} GB, cases {sum(len(cases(x)) for x in SPLITS) if not ph else '?'}/{b['max_cases']}, "
+          f"wall {b['max_wall_hours']} h since {s.get('loop_started')}; sif profiles alive: {len(s.get('profiles', {}))}")
+    if not ph and s.get("base_sha256"):
+        for n, h in s["base_sha256"].items():
+            if live_skill(n).exists() and tree_sha(live_skill(n)) != h:
+                print(f"note: live skill {n} differs from the gen-00 baseline (changed outside this loop, or promoted)")
 
 
 def cmd_freeze(a):
@@ -762,109 +1517,162 @@ def cmd_freeze(a):
         die("nothing scored")
     if not stop and not a.force:
         die("stop rule not reached yet (--force to freeze early)")
-    s = state(); s["frozen"] = best; s["frozen_at"] = now(); s["frozen_reason"] = stop or "forced"; save_state(s)
-    print(f"frozen {best} ({s['frozen_reason']}). Next: `sif run {best} --split test`, `sif score {best} --split test`, then `sif promote`.")
+    update_state(lambda s: s.update({"frozen": best, "frozen_at": now(), "frozen_reason": stop or "forced"}))
+    print(f"frozen {best} ({stop or 'forced'}). Next: dispatch control and detectors ({best}, gen-00) on --split test, score them, then `sif promote --auto`.")
 
 
-def cmd_unfreeze(a):
-    s = state(); s["frozen"] = None; save_state(s); print("unfrozen")
+def promote_check():
+    s = state(); g = s.get("frozen")
+    why = []
+    if not g:
+        return None, ["no frozen generation"]
+    if g == "gen-00":
+        why.append("the baseline is the best generation: nothing to promote (no improvement)")
+    src = ROOT / "generations" / g / "skills"
+    if tree_sha(src) != gen_meta(g).get("skill_sha256"):
+        why.append(f"{g} changed after lint/scoring")
+    tf, t0, tc = score_file(g, "test"), score_file("gen-00", "test"), score_file(CONTROL, "test")
+    if not (tf and t0):
+        why.append("test scores for the frozen generation and gen-00 are both required")
+    else:
+        if tf.get("skill_sha256") != gen_meta(g).get("skill_sha256"):
+            why.append("the test score was produced with a different skill hash")
+        F, B = tf["summary"], t0["summary"]
+        if not F["combined"] > B["combined"]:
+            why.append(f"test combined {F['combined']} is not above gen-00 {B['combined']}")
+        if F["rc_rate"] < B["rc_rate"]:
+            why.append(f"test rc_rate fell ({B['rc_rate']} -> {F['rc_rate']})")
+        if F["poc_rate"] < B["poc_rate"]:
+            why.append(f"test poc_rate fell ({B['poc_rate']} -> {F['poc_rate']})")
+        if not tc:
+            why.append("no control score on the test split")
+        elif "effect_combined" in F and "effect_combined" in B and F["effect_combined"] < B["effect_combined"]:
+            why.append("effect over control decreased")
+        if F["cases"] < CFG["promote"]["min_test_cases"]:
+            why.append(f"only {F['cases']} test case(s) (< {CFG['promote']['min_test_cases']})")
+    for n, sc in skills_cfg().items():
+        live = live_skill(n)
+        if tree_sha(live) != s["base_sha256"].get(n):
+            why.append(f"live skill {n} drifted since gen-00 (changed outside the loop)")
+        errs = guard_errors(live, src / n, sc["mode"]) if (src / n).exists() else [f"{n} missing in {g}"]
+        why += [f"{n}: {e}" for e in errs]
+    return g, why
 
 
 def cmd_promote(a):
-    s = state(); g = s.get("frozen")
-    if not g:
-        die("no frozen generation")
-    if g == "gen-00":
-        die("the baseline is the best generation: nothing to promote")
-    src, live = ROOT / "generations" / g / "skill", live_skill()
-    if tree_sha(src) != gen_meta(g).get("skill_sha256"):
-        die(f"{g} changed after lint/scoring; re-lint and re-score it")
-    drift = tree_sha(live) != s["base_sha256"]
-    diff = subprocess.run(["diff", "-ruN", str(live), str(src)], capture_output=True, text=True).stdout
-    print(diff or "(no difference)")
-    t = ROOT / "scores" / f"{g}.test.json"
-    print(f"\n{g}: refine full={refine_score(g)['summary']['full']}, test={'full=' + str(json.loads(t.read_text())['summary']['full']) if t.exists() else 'NOT RUN'}")
-    if drift:
-        print("WARNING: the live skill changed since gen-00 was taken; promoting would overwrite those changes.")
-    if not a.yes:
-        print("dry run. Re-run with --yes after the user approves this diff" + (" (and --allow-drift)" if drift else "") + ".")
+    g, why = promote_check()
+    if g:
+        for n in skills_cfg():
+            d = subprocess.run(["diff", "-ruN", str(live_skill(n)), str(ROOT / "generations" / g / "skills" / n)], capture_output=True, text=True).stdout
+            print(d or f"({n}: no difference)")
+    if why:
+        print("NOT PROMOTED (반영 보류):\n  - " + "\n  - ".join(why))
+        update_state(lambda s: s.update({"promote_decision": {"gen": g, "at": now(), "promoted": False, "reasons": why}}))
         return
-    if not t.exists() and not a.no_test:
-        die("no test score for the frozen generation; run and score --split test, or pass --no-test if the user waived it")
-    if drift and not a.allow_drift:
-        die("live skill drifted; merge by hand or pass --allow-drift")
+    if not a.auto:
+        print(f"all promotion conditions hold for {g}. Run `sif promote --auto` to write it back.")
+        return
     bak = ROOT / "archive" / f"pre-promote-{datetime.datetime.now():%Y%m%d-%H%M%S}"
-    shutil.copytree(live, bak)
-    real = live.resolve()
-    for p in list(real.iterdir()):
-        shutil.rmtree(p) if p.is_dir() else p.unlink()
-    shutil.copytree(src, real, dirs_exist_ok=True)
-    s["promoted"] = {"gen": g, "at": now(), "backup": str(bak.relative_to(ROOT)), "sha256": tree_sha(real)}
-    save_state(s)
-    print(f"promoted {g} -> {real} (backup: {bak.relative_to(ROOT)}). Not committed; review with git diff.")
+    for n in skills_cfg():
+        shutil.copytree(live_skill(n), bak / n)
+    for n in skills_cfg():
+        real = live_skill(n).resolve()
+        for p in list(real.iterdir()):
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+        shutil.copytree(ROOT / "generations" / g / "skills" / n, real, dirs_exist_ok=True)
+    rec = {"gen": g, "at": now(), "backup": str(bak.relative_to(ROOT)), "sha256": {n: tree_sha(live_skill(n)) for n in skills_cfg()},
+           "revert": f"cd {ROOT} && bin/sif revert {bak.relative_to(ROOT)}"}
+    update_state(lambda s: s.update({"promoted": rec, "promote_decision": {"gen": g, "at": now(), "promoted": True}}))
+    print(f"promoted {g} into the live skills (backup: {rec['backup']}). Not committed. Revert: {rec['revert']}")
 
 
-def cmd_lock(a):
-    lock_answers(); print("inbox/ and cases/ locked")
+def cmd_revert(a):
+    bak = inside(a.backup)
+    for n in skills_cfg():
+        if not (bak / n / "SKILL.md").exists():
+            die(f"{bak} has no {n}/SKILL.md")
+    for n in skills_cfg():
+        real = live_skill(n).resolve()
+        for p in list(real.iterdir()):
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+        shutil.copytree(bak / n, real, dirs_exist_ok=True)
+    update_state(lambda s: s.update({"reverted": {"from": str(a.backup), "at": now()}}))
+    print(f"live skills restored from {a.backup}")
 
 
 def cmd_unlock(a):
-    set_lock("cases", False)
-    if a.inbox:
-        set_lock("inbox", False)
-    print("cases/ open" + ("; inbox/ open (it is locked again at the next detector dispatch)" if a.inbox else "; inbox/ unchanged"))
+    unlock_all(); print("all sif locks released; the open detection phase (if any) is abandoned — score or re-dispatch it")
 
 
 def cmd_clean(a):
     n = 0
-    for d in (ROOT / "runs").glob("*/*/*/src"):
+    for d in (ROOT / "runs").glob("*/*/*/r*/src"):
         shutil.rmtree(d, ignore_errors=True); n += 1
-    print(f"removed {n} source snapshot(s)")
+    for d in (ROOT / "runs").glob("*/*/*/r*/score/build"):
+        shutil.rmtree(d, ignore_errors=True)
+    if phase():
+        print(f"removed {n} source snapshot(s); a detection phase is open, so run profiles are kept")
+        return
+    for p in list(state().get("profiles", {})):
+        remove_profile(p)
+    print(f"removed {n} source snapshot(s); sif profiles left: {len(state().get('profiles', {}))}")
 
 
 def main():
     ap = argparse.ArgumentParser(prog="sif", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("case").add_subparsers(dest="sub", required=True)
-    p = c.add_parser("add", help="build a case from user-supplied vulnerable source")
-    p.add_argument("--from", dest="from_", help="inbox/<source-version>: source (the folder, or its src/) with sol.md")
-    p.add_argument("--id", help="default: the folder name of --from"); p.add_argument("--split", choices=SPLITS, required=True)
+    p = c.add_parser("add", help="build a case from collected vulnerable source")
+    p.add_argument("--from", dest="from_", help="inbox/<folder>: src/ (or the folder), sol.md or fix.patch, poc/, kernel/, config, kasan.log")
+    p.add_argument("--id", help="default: random opaque id")
+    p.add_argument("--split", choices=SPLITS + ("auto",), default="auto")
     p.add_argument("--cwe", help="default: the single CWE id named in sol.md"); p.add_argument("--cwe-accept", nargs="*"); p.add_argument("--cve")
     p.add_argument("--src", help="vulnerable (before-fix) source directory")
-    p.add_argument("--sol", help="truth from: the user's intended answer (sol.md)")
-    p.add_argument("--fixed", help="truth from: fixed source directory with the same layout (changed files are enough)")
-    p.add_argument("--patch", help="truth from: fix patch that applies to --src")
-    p.add_argument("--truth", help="truth from: hand-written truth.json")
-    p.add_argument("--target-files", nargs="*", help="files named to the detector (default: the files in truth)")
+    p.add_argument("--sol"); p.add_argument("--fixed"); p.add_argument("--patch"); p.add_argument("--truth")
+    p.add_argument("--fix", help="fix patch kept for diagnosis when the truth comes from sol.md")
+    p.add_argument("--scope", nargs="*", help="subsystem directories given to the detector (default: parent dirs of the truth files)")
+    p.add_argument("--no-extract", action="store_true", help="store the source as given instead of scope + included headers")
+    p.add_argument("--config", help="kernel .config to include (version lines are stripped)")
+    p.add_argument("--poc", help="public PoC normalised to <dir>/poc.c (+ ldlibs.txt, run.json)")
+    p.add_argument("--kernel", help="dir with the case's KASAN bzImage and vmlinux[.gz]")
+    p.add_argument("--kasan-log", help="public KASAN log (kept for diagnosis)")
+    p.add_argument("--version-hidden", action="store_true", help="the kernel was built with a neutral version string")
     p.set_defaults(f=cmd_case_add)
-    p = c.add_parser("ls"); p.add_argument("-v", "--verbose", action="store_true"); p.set_defaults(f=cmd_case_ls)
+    p = c.add_parser("ls"); p.set_defaults(f=cmd_case_ls)
+    p = c.add_parser("verify"); p.add_argument("id"); p.set_defaults(f=cmd_case_verify)
+    p = c.add_parser("review"); p.add_argument("id"); p.set_defaults(f=cmd_case_review)
+    p = c.add_parser("drop"); p.add_argument("id"); p.add_argument("--reason", required=True); p.set_defaults(f=cmd_case_drop)
     gp = sub.add_parser("gen").add_subparsers(dest="sub", required=True)
     gp.add_parser("init").set_defaults(f=cmd_gen_init)
     p = gp.add_parser("new"); p.add_argument("--parent"); p.add_argument("--note"); p.add_argument("--force", action="store_true"); p.set_defaults(f=cmd_gen_new)
     p = gp.add_parser("lint"); p.add_argument("gen"); p.set_defaults(f=cmd_gen_lint)
-    p = sub.add_parser("run"); p.add_argument("gen"); p.add_argument("--split", choices=SPLITS, default="refine")
-    p.add_argument("--cases", nargs="*"); p.add_argument("--jobs", type=int, default=1); p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--prep-only", action="store_true", help="build workspaces only (for subagent-driven runs)")
-    p.add_argument("--keep-src", action="store_true"); p.add_argument("--force", action="store_true"); p.set_defaults(f=cmd_run)
-    p = sub.add_parser("score"); p.add_argument("gen"); p.add_argument("--split", choices=SPLITS, default="refine"); p.set_defaults(f=cmd_score)
-    p = sub.add_parser("diagnose"); p.add_argument("gen"); p.add_argument("--force", action="store_true"); p.set_defaults(f=cmd_diagnose)
     p = sub.add_parser("dispatch", help="prepare workspaces and print subagent prompts (JSON)")
-    p.add_argument("role", choices=("detector", "diagnoser")); p.add_argument("gen")
+    p.add_argument("role", choices=("detector", CONTROL, "diagnoser")); p.add_argument("gen", nargs="?", default=CONTROL)
     p.add_argument("--split", choices=SPLITS, default="refine"); p.add_argument("--cases", nargs="*")
-    p.add_argument("--force", action="store_true"); p.set_defaults(f=cmd_dispatch)
+    p.add_argument("--force", action="store_true"); p.add_argument("--retry-contaminated", action="store_true"); p.set_defaults(f=cmd_dispatch)
+    p = sub.add_parser("run", help="non-interactive alternative to dispatch (claude -p per run)")
+    p.add_argument("gen"); p.add_argument("--split", choices=SPLITS, default="refine"); p.add_argument("--cases", nargs="*")
+    p.add_argument("--jobs", type=int, default=2); p.add_argument("--force", action="store_true"); p.set_defaults(f=cmd_run)
+    p = sub.add_parser("score"); p.add_argument("gen"); p.add_argument("--split", choices=SPLITS, default="refine")
+    p.add_argument("--no-poc", action="store_true"); p.set_defaults(f=cmd_score)
+    p = sub.add_parser("diagnose"); p.add_argument("gen"); p.add_argument("--force", action="store_true"); p.set_defaults(f=cmd_diagnose)
     sub.add_parser("status").set_defaults(f=cmd_status)
     p = sub.add_parser("freeze"); p.add_argument("--force", action="store_true"); p.set_defaults(f=cmd_freeze)
-    sub.add_parser("unfreeze").set_defaults(f=cmd_unfreeze)
-    p = sub.add_parser("promote"); p.add_argument("--yes", action="store_true"); p.add_argument("--allow-drift", action="store_true")
-    p.add_argument("--no-test", action="store_true", help="user waived the held-out test"); p.set_defaults(f=cmd_promote)
+    p = sub.add_parser("promote"); p.add_argument("--auto", action="store_true", help="write back when every condition holds"); p.set_defaults(f=cmd_promote)
+    p = sub.add_parser("revert"); p.add_argument("backup"); p.set_defaults(f=cmd_revert)
     sub.add_parser("clean").set_defaults(f=cmd_clean)
-    sub.add_parser("lock", help="make inbox/ and cases/ unreadable").set_defaults(f=cmd_lock)
-    p = sub.add_parser("unlock"); p.add_argument("--inbox", action="store_true"); p.set_defaults(f=cmd_unlock)
+    sub.add_parser("unlock", help="release every sif lock (abandons an open detection phase)").set_defaults(f=cmd_unlock)
     a = ap.parse_args()
-    if a.cmd == "score":
-        set_lock("cases", False)  # scoring ends the detection phase
-    elif a.cmd not in ("status", "clean", "lock", "unlock") and locked("cases"):
-        die("cases/ is locked because detectors were dispatched; `sif score <gen>` ends that phase (or `sif unlock`)")
+    for d in ("runs", "cases/refine", "cases/test", "inbox", "vmimg", "generations", "lessons", "scores", "archive"):
+        try:
+            (ROOT / d).mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            pass  # locked during a detection phase
+    ph = phase()
+    if ph and a.cmd not in ("status", "clean", "unlock", "score", "dispatch", "run"):
+        die(f"a detection phase is open ({ph['kind']} {ph['split']}); `sif score {ph['kind']} --split {ph['split']}` ends it")
+    if ph and a.cmd in ("dispatch", "run") and getattr(a, "role", None) != "diagnoser":
+        die(f"a detection phase is open ({ph['kind']} {ph['split']}); score it before dispatching more detectors")
     a.f(a)
 
 

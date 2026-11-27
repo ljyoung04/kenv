@@ -1,5 +1,29 @@
 {
-  "target_skill": "vuln-discovery",
-  "base_sha256": "1f22fb656f1946b0c4f795fd602a1e376137ab2503f51a6538155e7b97a9a1c9",
-  "frozen": null
+  "target_skills": [
+    "vuln-discovery",
+    "dynamic-validation"
+  ],
+  "base_sha256": {
+    "vuln-discovery": "22ce9a98ead82f0b37c211f8ccb7041d2dc4bfccba91d8b3b68fea7a51c5fe48",
+    "dynamic-validation": "2e5c8a66c00c038e00085aca40a6a92f97f8448aa6a2872d9c51a3041ce18f08"
+  },
+  "frozen": null,
+  "loop_started": null,
+  "settings": {
+    "model": "opus",
+    "model_id": "claude-opus-5-5",
+    "effort": "medium",
+    "runs_per_case": 3,
+    "poc": true
+  },
+  "profiles": {},
+  "phase": null,
+  "promote_decision": {
+    "gen": null,
+    "at": "2026-11-27T02:26:48+00:00",
+    "promoted": false,
+    "reasons": [
+      "no frozen generation"
+    ]
+  }
 }

@@ -1,8 +1,8 @@
 # Scout pass: reachable surfaces and object maps
 
 Read this when you are a scout or object-map worker for `vuln-discovery`.
-You run on a cost-efficient model. The analyst pass (strongest model)
-reasons over your output, so whatever you omit becomes its blind spot.
+The analyst pass reasons over your output, so whatever you omit becomes
+its blind spot.
 Breadth and exact locations matter more than insight here: record facts
 with `path:line`, and leave judgments about bugs to the analyst.
 
@@ -18,7 +18,7 @@ Ground rules:
   orchestrator checks citations mechanically, and a bare file name fails.
 - Record the exact search commands you ran, so the orchestrator can re-run
   them to measure completeness.
-- Start the file with `Produced-by: <model>`.
+- Start the file with `Produced-by: <model, effort>`.
 
 ## Part A — Scout: select reachable surfaces
 
@@ -85,7 +85,7 @@ Write `exploration/<scope-id>.md`, one record per target:
 
 ```text
 Target-ID: T-0001
-Produced-by: <model>
+Produced-by: <model, effort>
 Owner-scope: <assigned area>
 Code: <files, directories, key symbols>
 Entry: <attacker-originated entry point>
@@ -133,7 +133,7 @@ Write `objects/<target-id>.md`:
 
 ```text
 Target-ID: T-0001
-Produced-by: <model>
+Produced-by: <model, effort>
 Source root: <path> @ <revision>   (all paths below are relative to it)
 
 ## Object: struct foo_ctx

@@ -1,7 +1,14 @@
 {
-  "target_skill": "vuln-discovery",
+  "target_skills": {
+    "vuln-discovery": {"mode": "protected", "part": "root cause (Part 1)"},
+    "dynamic-validation": {"mode": "editable", "part": "KASAN reproducer (Part 2); only the sif:editable block may change"}
+  },
   "max_rounds": 10,
   "patience": 2,
+  "runs_per_case": 3,
+  "majority": 2,
+  "test_fraction": 0.34,
+  "memorized_threshold": 0.67,
   "topk": 3,
   "line_tolerance": 2,
   "max_range_lines": 15,
@@ -10,16 +17,44 @@
     "tools/testing",
     ".git"
   ],
-  "run_timeout_sec": 5400,
-  "model": null,
+  "detector_model": "opus",
+  "diagnoser_model": "opus",
+  "model_id": "claude-opus-5-5",
+  "effort": "medium",
+  "guest_fs": "images/x64",
+  "poc": {
+    "enabled": true,
+    "compile": ["gcc", "-O2", "-static", "-pthread", "-o", "poc", "poc.c"],
+    "default_timeout_sec": 120,
+    "max_timeout_sec": 300,
+    "boot_timeout_sec": 240,
+    "verify_attempts": 3,
+    "score_attempts": 3,
+    "infra_retries": 2,
+    "match_frames": 6,
+    "detector_max_boots": 6,
+    "detector_max_attempts": 20,
+    "smp": 2,
+    "mem": "3.5G"
+  },
+  "budget": {
+    "max_cases": 40,
+    "max_wall_hours": 72,
+    "max_parallel_agents": 5,
+    "max_parallel_vms": 4,
+    "max_disk_gb": 60
+  },
+  "promote": {
+    "auto": true,
+    "min_test_cases": 5
+  },
+  "run_timeout_sec": 7200,
   "claude_args": [
     "--permission-mode",
     "acceptEdits",
     "--allowedTools",
-    "Read,Grep,Glob,Write,Edit,Agent,Bash(rg:*),Bash(grep:*),Bash(sed:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*),Bash(head:*),Bash(tail:*),Bash(sha256sum:*)",
+    "Read,Grep,Glob,Write,Edit,Agent,Bash(rg:*),Bash(grep:*),Bash(sed:*),Bash(ls:*),Bash(cat:*),Bash(wc:*),Bash(find:*),Bash(head:*),Bash(tail:*),Bash(sha256sum:*),Bash(gcc:*),Bash(date:*),Bash(sleep:*),Bash(/workspace/tools/vm.sh:*)",
     "--disallowedTools",
-    "WebSearch,WebFetch"
-  ],
-  "detector_model": null,
-  "diagnoser_model": null
+    "WebSearch,WebFetch,Skill"
+  ]
 }

@@ -37,6 +37,11 @@ Profile required (-p):
   run <vm_name> [opts]     Boot a new VM under -p; refuse an existing VM dir. opts:
                              --shared   enable 9p host_share
                              --kaslr    enable KASLR (default: nokaslr)
+                             --isolated guest cannot reach the host or the
+                                        outside network (QEMU user-net
+                                        restrict=on); SSH/GDB forwarding still
+                                        works. Forced when the profile sets
+                                        NET_ISOLATED=1.
                              --android  device-matched env (Pixel 10 6.6.82):
                                         8 cpu, 12G, rcu_nocbs=all + expedited
 
@@ -347,11 +352,13 @@ cmd_run() {
     local enable_shared=false
     local enable_kaslr=false
     local android_mode=false
+    local net_isolated=false
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --shared)  enable_shared=true; shift ;;
             --kaslr)   enable_kaslr=true;  shift ;;
             --android) android_mode=true;  shift ;;
+            --isolated) net_isolated=true; shift ;;
             --) shift; break ;;
             -*) error "Unknown run option: $1"; exit 2 ;;
             *)
@@ -363,11 +370,19 @@ cmd_run() {
         esac
     done
     if [ -z "$vm_name" ]; then
-        error "usage: vm.sh run <vm_name> [--shared] [--kaslr] [--android]"
+        error "usage: vm.sh run <vm_name> [--shared] [--kaslr] [--android] [--isolated]"
         exit 2
     fi
     validate_scope_name "VM name" "$vm_name" || exit 2
     require_profile
+    # A profile may force guest network isolation (used by SKILL-SIF run profiles).
+    if [ "${NET_ISOLATED:-0}" = "1" ]; then
+        net_isolated=true
+    fi
+    if [ "$net_isolated" = "true" ] && [ "$enable_shared" = "true" ]; then
+        error "--shared is not allowed on an isolated VM"
+        exit 2
+    fi
 
     : "${ARCH:?ARCH not set in profile}"
     : "${FS:?FS not set in profile}"
@@ -447,6 +462,7 @@ cmd_run() {
         printf 'export VM_KOBJ=%q\n'         "${KOBJ:-}"
         printf 'export VM_FS=%q\n'           "$FS"
         printf 'export VM_LOG=%q\n'          "$LOG_FILE"
+        printf 'export VM_NET_ISOLATED=%q\n' "$net_isolated"
     } > "$META_FILE"
 
     IO_URING="sysctl.kernel.io_uring_disabled=2"
@@ -470,6 +486,10 @@ cmd_run() {
     if [ -n "${EXTRA_CMDLINE:-}" ]; then
         KAPPEND="$KAPPEND $EXTRA_CMDLINE"
     fi
+    local NIC_OPTS="user,model=virtio-net-pci,hostfwd=tcp::${SSH_P}-:22"
+    if [ "$net_isolated" = "true" ]; then
+        NIC_OPTS="user,model=virtio-net-pci,restrict=on,hostfwd=tcp::${SSH_P}-:22"
+    fi
     local QEMU_ARGS=(
         -m "${MEM:-3.5G}"
         -cpu host
@@ -477,7 +497,7 @@ cmd_run() {
         -kernel "$kernel_image"
         -append "$KAPPEND"
         -drive "file=$FS/bookworm.img,format=raw,snapshot=on,if=virtio"
-        -nic "user,model=virtio-net-pci,hostfwd=tcp::${SSH_P}-:22"
+        -nic "$NIC_OPTS"
         -chardev "stdio,id=char0,mux=on,signal=off,logfile=$LOG_FILE,logappend=off"
         -serial "chardev:char0"
         -enable-kvm
@@ -548,6 +568,7 @@ cmd_run() {
  TMUX:     $SESSION:$vm_name
  SHARED:   $([ "$enable_shared" = "true" ] && echo "on ($SHARE → /mnt/host_share)" || echo "off")
  KASLR:    $([ "$enable_kaslr" = "true" ] && echo "on" || echo "off (nokaslr)")
+ NET:      $([ "$net_isolated" = "true" ] && echo "isolated (restrict=on; SSH/GDB forwarding only)" || echo "user-net (outbound allowed)")
  CPU/MEM:  ${SMP:-2} cpu / ${MEM:-3.5G}
  ANDROID:  $([ "$android_mode" = "true" ] && echo "on (rcu_nocbs=all, rcu_expedited)" || echo "off")
 =================================================

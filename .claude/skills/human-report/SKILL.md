@@ -17,6 +17,11 @@ behind every claim and exposes gaps. It is not a polishing pass.
 - Do the review yourself, from the originals rather than from earlier
   summaries. If the user asks for subagents, use a reviewer that did not
   produce the key results.
+- Subagents, when used: in kernelCTF research `model: "opus"` (Opus 5.5),
+  `effort: "max"`; otherwise `model: "opus"` with no effort set. A model or
+  effort the user names for the request wins. Record the model ID and effort
+  used; on a model error retry once with the same settings, then do the work
+  yourself rather than switching models.
 - Write to `agent/<research-name>/human-report/<vuln-name>/`. Do not edit
   originals or other tasks' reports. Link large originals by relative path
   and hash instead of copying them.

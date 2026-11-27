@@ -1,24 +1,24 @@
 ---
 name: vuln-discovery
-description: Statically audit a kernel source tree for vulnerability candidates in kenv. A cost-efficient model selects code an unprivileged attacker can reach and maps each subsystem's key objects (where they are allocated, published, used, and freed). The strongest model then tracks object state across functions and files to find use-after-free caused by broken concurrency or lifetime management, and out-of-bounds access caused by unvalidated user values, and actively falsifies each hypothesis. Earlier agents' results in agent/ are re-verified, not trusted. Use for source audits, vulnerability discovery, static triage, and re-checking earlier audit verdicts; not for running PoCs, dynamic validation, or patching.
+description: Statically audit a kernel source tree for vulnerability candidates in kenv. For kernelCTF it first checks the active targets with the server's read-only `info`, audits the hardened tree, then checks each candidate against the active LTS. Scout workers select code an unprivileged attacker can reach and map each subsystem's key objects (where they are allocated, published, used, and freed). Analyst workers then track object state across functions and files to find use-after-free caused by broken concurrency or lifetime management, and out-of-bounds access caused by unvalidated user values, and actively falsifies each hypothesis. Earlier agents' results in agent/ are re-verified, not trusted. Use for source audits, vulnerability discovery, static triage, and re-checking earlier audit verdicts; not for running PoCs, dynamic validation, or patching.
 ---
 
 # Vulnerability Discovery
 
-Narrow a large codebase in two passes that run on different model tiers.
-Deliver a small set of candidates with verifiable static evidence, and keep
-the negative results.
+Narrow a large codebase in two passes: a broad scout pass and a deep analyst
+pass. Deliver a small set of candidates with verifiable static evidence, and
+keep the negative results.
 
-1. **Scout pass** (cost-efficient model): select code an unprivileged
+1. **Scout pass**: select code an unprivileged
    attacker can reach. Then map the main objects of each selected
    subsystem: where they are allocated, published, used, released, and
    freed.
-2. **Analyst pass** (strongest model): starting from that map, work out how
+2. **Analyst pass**: starting from that map, work out how
    the attacker can drive each object's state. Look for objects freed while
    another path still uses them. Look for user-originated values used in
    index, size, or offset arithmetic without adequate validation. Track
    state across functions and files, and try to falsify every hypothesis.
-3. **Re-verification** (strongest model): re-derive verdicts from earlier
+3. **Re-verification**: re-derive verdicts from earlier
    work in `agent/`, and the important verdicts of this run, instead of
    inheriting them.
 
@@ -28,39 +28,49 @@ are leads, not findings.
 
 ## Scope
 
+<!-- sif:protected scope -->
 - Follow root `AGENTS.md` (isolation, VM naming, artifact locations).
 - **Static only.** Source reading, `git log`/`git blame`, `rg`, compiler
   diagnostics, static analyzers, and public documentation may run on the host.
 - Do not build-and-run PoCs, fuzz, boot VMs, or write patches in this stage.
   Those belong to `dynamic-validation` and `patch-generation`.
 - Read public rules, source, and patches read-only. Do not contact third
-  parties, upload, submit, or disclose.
+  parties, upload, submit, or disclose. The single exception is the
+  read-only `tools/kctf.sh info` query of §0a.
 - Write everything under `agent/<research-name>/`. You may read other
   research directories but never edit them.
+<!-- /sif:protected -->
+- Work without waiting for the user. Where this skill leaves a choice, take
+  the documented default and record the decision and its reason in
+  `FINDINGS.md`. Stop only at the actions root `AGENTS.md` reserves for the
+  user (official-service tests, submission, exploit development, host
+  changes); record those as `AWAITING_APPROVAL` and continue with the rest.
 
 ## Execution model
 
-The two passes need different strengths. Scouting and object mapping are
-broad and search-heavy, and their output is `path:line` facts that can be
-checked mechanically, so a cost-efficient model is enough. Analysis has to
-keep many functions, files, locks, execution contexts, and object states in
-view at once. Lifetime and synchronization bugs are where weaker models
-miss, so analysis gets the strongest model and the highest effort. Spend the
-budget there.
+Scouting and object mapping are broad and search-heavy; analysis has to keep
+many functions, files, locks, execution contexts, and object states in view
+at once. Both run on the same model; the settings depend on the kind of task,
+not on the pass.
 
-| Work | Who | Agent tool settings |
+| Task | Workers | Agent tool settings |
 |---|---|---|
-| Scope record, prior-work intake, gates, `targets.md`, `FINDINGS.md` | Orchestrator (session model) | — |
-| Scout (§2a), object map (§2b) | One worker per scope or per target | `model: "sonnet"` |
-| Analyst (§3), re-verifier (§1, §4) | One worker per target or per claim | `model: "fable"`, `effort: "max"` |
+| kernelCTF research (finding bugs to submit) | every worker: scout, object map, analyst, re-verifier | `model: "opus"` (Opus 5.5, `claude-opus-5-5`), `effort: "max"` |
+| SKILL-SIF benchmark run | every worker the detector dispatches | `model: "opus"`, `effort: "medium"` (the run's `task.md` states it and wins over this table) |
+| Any other audit | every worker | `model: "opus"`, effort not set |
 
-- This tiering is the user's standing instruction for this skill. Dispatch
-  the workers without asking again. The user can override the models for a
-  given request.
-- If `fable` is unavailable or declines the task, use `opus` for analysts
-  and re-verifiers, and record that you did.
-- Do not use `haiku` for either pass. Anything the object map misses, the
-  analyst never examines.
+The orchestrator (session model) keeps the scope record, prior-work intake,
+gates, `targets.md`, and `FINDINGS.md`.
+
+- This is the user's standing instruction for this skill. Dispatch the
+  workers without asking again. Use another model or effort only when the
+  user names one for the request.
+- Always pass `model` and, where the table gives one, `effort` explicitly.
+  Record the model ID and effort actually used in `Produced-by`. If the
+  `opus` alias resolves to a version other than Opus 5.5, record that.
+- If a worker fails on a model limit or error, retry it once with the same
+  settings. If it fails again, do that pass yourself and record it. Do not
+  substitute another model (no `sonnet`, `fable`, or `haiku`).
 - Use `subagent_type: "general-purpose"`, because workers write their own
   file. Dispatch independent workers in one message, and wait for the whole
   pass before running its gate.
@@ -77,33 +87,33 @@ budget there.
   `scope.md`, `targets.md`, and `FINDINGS.md`.
 - Every record carries `Produced-by: <model, effort>`.
 - If no subagent facility is available (another runtime, or dispatch is
-  denied), run the passes yourself in order and record the model actually
-  used. Label any analysis done below the analyst tier. Later runs treat
-  that label as a re-verification trigger.
+  denied), run the passes yourself in order and record the model and effort
+  actually used. Label any analysis done with a lower effort than the table
+  gives. Later runs treat that label as a re-verification trigger.
 
 Dispatch prompts. Paths are absolute so that workers need no inherited
 context:
 
 ```text
-Scout (model "sonnet")
+Scout (model "opus", effort per the table)
   Follow Part A of /workspace/.claude/skills/vuln-discovery/references/scout-object-map.md.
   Research dir: /workspace/agent/<research-name>/ (read scope.md first).
   Owner-scope: <directories / interfaces>. Write only exploration/<scope-id>.md.
   Return: Target-IDs written, excluded and unreviewed areas, leads.
 
-Object map (model "sonnet")
+Object map (model "opus", effort per the table)
   Follow Part B of the same file for <T-ID> as recorded in targets.md.
   Research dir: /workspace/agent/<research-name>/. Write only objects/<T-ID>.md.
   Return: objects mapped, rows per kind, unresolved items, leads.
 
-Analyst (model "fable", effort "max")
+Analyst (model "opus", effort per the table)
   Follow /workspace/.claude/skills/vuln-discovery/references/analyst-lifetime-bounds.md for <T-ID>.
   Research dir: /workspace/agent/<research-name>/.
   Inputs: scope.md, the <T-ID> entry in targets.md, objects/<T-ID>.md.
   Write only analysis/<T-ID>.md.
   Return: Candidate-IDs with status and decisive question, inventory corrections, coverage gaps.
 
-Re-verifier (model "fable", effort "max")
+Re-verifier (model "opus", effort per the table)
   Follow the same analyst file as a re-verifier.
   Research dir: /workspace/agent/<research-name>/.
   Claim under test: <the verdict, and for REJECTED the guard it relies on, in one or two sentences>.
@@ -111,6 +121,37 @@ Re-verifier (model "fable", effort "max")
   Earlier record: <path>. Open it only after writing your own verdict.
   Write only reverify/<original-id>.md.
 ```
+
+## 0a. kernelCTF targets and order (kernelCTF research only)
+
+Skip this section for SKILL-SIF runs and for audits that are not aimed at
+kernelCTF; those never contact the official server.
+
+1. **Active targets.** At the start of the session, run
+   `tools/kctf.sh info` once. <!-- sif:protected info-approval -->This one
+   read-only query is approved standing by the user; do not ask again. No
+   other official-service action (`vuln-test`, submission) is covered: those
+   still need explicit per-attempt approval through `kctf-official-helper`.
+   Do not open a raw session with `tools/connect.sh`.<!-- /sif:protected -->
+   If `info` fails, retry twice; then take the active releases from the
+   public release bucket and mark the whole run `provisional`.
+2. **Version check.** For the active hardened target and the active LTS,
+   compare the local source tree under `kernels/` with the release's
+   `COMMIT_INFO` (`https://storage.googleapis.com/kernelctf-build/releases/<release>/COMMIT_INFO`):
+   version and commit must match. Record both in `scope.md`. If a tree is
+   missing or does not match, fetch the matching source and artifacts from
+   public locations (release bucket over HTTPS, public git) into a new
+   `kernels/<release>/` and use that. Never delete or overwrite an existing
+   tree. Audit the active target trees, not mainline.
+3. **Order: hardened first, then LTS.** The scout and analyst passes audit
+   the active hardened tree. For every candidate that leaves §4, check
+   statically whether the same root cause exists in the active LTS tree: the
+   code is present, the file is compiled in the LTS config, and the entry
+   path exists. Record the result in `LTS-trigger` with `path:line` in the
+   LTS tree. Whether it actually triggers on LTS is a runtime question for
+   `dynamic-validation`.
+4. A negative LTS result is an eligibility fact. It never changes the
+   candidate's technical status (see §3 "Candidate record").
 
 ## 0. Scope record
 
@@ -155,9 +196,10 @@ Record the URL and lookup time in `scope.md`, then track separately:
 | `LTS-trigger` | Is the same root cause triggerable on the required LTS target? |
 | `Attacker` | Reachable under the official starting privileges and disabled subsystems? |
 
-Leave anything public information cannot resolve as `UNKNOWN`. Do not use
-the official service here; that requires `kctf-official-helper` and explicit
-user approval.
+Leave anything public information cannot resolve as `UNKNOWN`.
+<!-- sif:protected official-service -->Apart from the read-only `info` query
+of §0a, do not use the official service here; that requires
+`kctf-official-helper` and explicit user approval.<!-- /sif:protected -->
 
 ## 1. Prior work in `agent/`
 
@@ -237,7 +279,7 @@ nothing inherits other agents' mistakes.
   `Reverification: NOT_DONE <reason>` and keep its area out of this run's
   audited coverage.
 
-## 2. Scout pass (cost-efficient tier)
+## 2. Scout pass
 
 ### 2a. Reachable surfaces
 
@@ -305,7 +347,7 @@ gaps, either to the same worker with SendMessage or to a new one. If it is
 still incomplete, hand it to the analyst marked `INCOMPLETE` so the analyst
 rebuilds those parts. Never pass on a map you have not checked.
 
-## 3. Analyst pass (strongest tier)
+## 3. Analyst pass
 
 One analyst per target follows `references/analyst-lifetime-bounds.md`, with
 the target record and the verified object map as inputs. In short:
@@ -461,6 +503,15 @@ Update `agent/<research-name>/FINDINGS.md` with:
 If nothing survives, do not write "no vulnerabilities." Write that no
 candidate was confirmed within the audited scope, the threat model, and the
 listed blind spots.
+
+### Handoff (kernelCTF research)
+
+In kernelCTF research, candidates that pass §4 (`SOURCE_CONFIRMED` after
+re-verification) go on to `dynamic-validation` without waiting for the user.
+Load that skill and continue; this hands-off chaining is the user's standing
+instruction. Candidates already `DYNAMIC_CONFIRMED` in an earlier record are
+not validated again. Outside kernelCTF research, hand off only when the user
+asked for runtime validation.
 
 ## Background
 

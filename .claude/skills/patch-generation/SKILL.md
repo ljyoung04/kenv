@@ -28,6 +28,11 @@ conventions.
   own profile and `KOBJ`. Do not commit to or push the original tree.
 - Write artifacts to `agent/<research-name>/patch/<candidate-id>/`. Do not
   send email, open PRs, or contact maintainers.
+- Subagents, when used: in kernelCTF research `model: "opus"` (Opus 5.5),
+  `effort: "max"`; otherwise `model: "opus"` with no effort set. A model or
+  effort the user names for the request wins. Record the model ID and effort
+  used; on a model error retry once with the same settings, then do the work
+  yourself rather than switching models.
 
 ## 1. Re-check against the latest code
 

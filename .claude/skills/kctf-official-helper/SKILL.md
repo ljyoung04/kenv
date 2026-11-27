@@ -18,11 +18,21 @@ uploaded file, and result. This skill does not grant authorization.
 3. Before connecting, confirm the user-approved **action**, destination,
    Candidate-ID, Target-ID, exact upload files, and maximum attempts in the
    current conversation. `tools/connect.sh`, the certificate, earlier
-   approvals, or permission for local testing are not authorization.
+   approvals, or permission for local testing are not authorization. The
+   only standing approval is the session-start `info` query described
+   below.
 
 Public web material (rules, release metadata, artifacts over HTTPS) needs no
-approval. `info` still connects to the official service, so it needs
-approval. Prefer public data when it is enough.
+approval. `info` still connects to the official service. One read-only
+`tools/kctf.sh info` query at the start of a kernelCTF research session (the
+version check in `vuln-discovery` §0a) is approved standing by the user and
+needs no per-session request. Any other `info` use, and every other action,
+needs approval as described above. Prefer public data when it is enough.
+
+When an action here needs approval and the user is not available, do not
+block the rest of the pipeline: record it as `AWAITING_APPROVAL` with the
+action, target, reproducer hash, and requested attempt count in
+`FINDINGS.md`, and let the other work continue.
 
 ## Actions
 

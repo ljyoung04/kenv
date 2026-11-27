@@ -27,6 +27,7 @@ a VM must pass both `-p <profile>` and `-v <vm>` before the subcommand.
 /workspace/tools/kernel.sh -p <p> --build -j 16
 /workspace/tools/kernel.sh -p <p> --clang
 /workspace/tools/vm.sh -p <p> run <task>_$(date +%s)
+/workspace/tools/vm.sh -p <p> run <task>_$(date +%s) --isolated   # guest has no network
 
 # VM-scoped operations
 /workspace/tools/vm.sh -p <p> -v <v> ssh -- uname -r
@@ -77,7 +78,9 @@ made from letters, digits, `_`, or `-`. If a stopped directory already has that
 name, use a new timestamp. Generic names such as `a`, `vm`, `vm1`, `test`, and
 `debug` belong to users; never create, stop, remove, or reuse them.
 
-`run` refuses to overwrite an existing VM directory. `kill` stops QEMU but
+`run` refuses to overwrite an existing VM directory. `--isolated` (or
+`NET_ISOLATED=1` in the profile) cuts the guest off from the host and the
+outside network while SSH and GDB forwarding keep working. `kill` stops QEMU but
 keeps logs and metadata. `rm` deletes a stopped VM directory and refuses a live
 VM. Do not operate on a VM that this task did not create unless the user
 explicitly identifies it as the target.
@@ -109,7 +112,8 @@ without the diagnostic message and `boot.log` evidence.
 │       ├── vm.pid                 QEMU PID
 │       └── boot.log               serial console log
 ├── agent/                         agent-generated research artifacts
-├── SKILL-SIF/                     skill self-improvement workspace (`skill-sif` skill only)
+├── SKILL-SIF/                     skill self-improvement workspace (`skill-sif` skill only;
+│                                  it also owns `profiles/sif-*` and `kernels/sif-*`)
 ├── user/                          user-owned material; preserve it
 ├── save/                          saved material; preserve it
 ├── commands.txt                   user and automation command recipes
@@ -158,10 +162,24 @@ the skill for the current stage.
 - Agent work ends at root cause, minimal reproducer, patch, and review
   bundle. Exploit development is out of scope for agents; the user handles it.
 - Run only the stages the user requested, in order. Finish and record each
-  stage's gate before starting the next one.
-- Source review alone does not authorize running code in a guest. Local
-  validation does not authorize using the official service. A patch does not
-  authorize submission or disclosure.
+  stage's gate before starting the next one. Standing exception: in
+  kernelCTF research, candidates that pass the `vuln-discovery` gate go on
+  to `dynamic-validation` (local, task-owned VMs) without asking.
+- Work unattended. Where a stage leaves a choice, take its documented
+  default and record the decision; on infrastructure errors retry twice,
+  then record `INFRA_BLOCKED` and move on. Only these wait for the user:
+  official-service actions other than the session-start `info` query,
+  submission or disclosure, exploit development, host changes or anything
+  needing sudo, changes to `user/`/`save/`/other tasks' material, and git
+  commits. Record them as `AWAITING_APPROVAL` and continue with the rest.
+- Local validation does not authorize `vuln-test` on the official service.
+  A patch does not authorize submission or disclosure.
+- Subagent settings: kernelCTF research uses `model: "opus"` (Opus 5.5)
+  with `effort: "max"` for every worker of every stage; SKILL-SIF uses
+  `model: "opus"` with `effort: "medium"`; other work uses `model: "opus"`
+  with no effort set. A model or effort the user names for a request wins.
+  Never substitute another model on errors; retry once, then do the work in
+  the session.
 - Treat scanner, model, and earlier-agent output as hypotheses. Never raise a
   verdict above its evidence. Keep negative verdicts (`REJECTED`,
   `NOT_REPRODUCED`, `INFRA_BLOCKED`, `NEEDS_CONTEXT`) with their evidence.
@@ -171,10 +189,13 @@ the skill for the current stage.
   assumptions, not just a summary of the conversation.
 - `user/tmp/` holds the earlier Codex-oriented copies of these rules for
   reference only.
-- `SKILL-SIF/` is the offline benchmark and self-improvement loop for
-  `vuln-discovery`. It is not a research stage. Enter it only through the
-  `skill-sif` skill, and only when the user explicitly asks; do not read
-  its cases or ground truth during ordinary research.
+- `SKILL-SIF/` is the benchmark and self-improvement loop for
+  `vuln-discovery` and the reproducer part of `dynamic-validation`. It is
+  not a research stage. Enter it only through the `skill-sif` skill, and
+  only when the user explicitly asks; once started it runs unattended and
+  may write back an improved skill only through its guarded
+  `bin/sif promote --auto`. Do not read its cases or ground truth during
+  ordinary research.
 
 ## kernelCTF official tooling (`tools/kctf.sh`)
 
@@ -194,7 +215,9 @@ tools/kctf.sh rules | style | faq         # print local rules.md / style_guide.m
 tools/kctf.sh check-config <target.config> user/kctf/security-research/kernelctf/kernel_configs/<target>.config
 tools/kctf.sh sim <release-name> [--root] # boot a release in a LOCAL VM (no official server)
 tools/kctf.sh repro-summary <repro.log>
-tools/kctf.sh info                        # read-only query of active targets (contacts official server)
+tools/kctf.sh info                        # read-only query of active targets (contacts official server;
+                                          # one query at the start of a kernelCTF research session is
+                                          # approved standing, see vuln-discovery §0a)
 tools/kctf.sh vuln-test <reproducer> [--local] [cli args...]  # LTS crash-trigger test (official unless --local)
 ```
 
@@ -209,7 +232,8 @@ service and is **refused** unless the operator opts in with
 `KCTF_CONFIRM_OFFICIAL=1` (or passes `--local` to target a local server/VM).
 The gate is a backstop only: an agent must still obtain the user's explicit,
 per-attempt approval before any official-service action, exactly as the
-`kctf-official-helper` stage requires. The local/offline subcommands
+`kctf-official-helper` stage requires. The single standing approval is the
+read-only `info` query at the start of a kernelCTF research session. The local/offline subcommands
 (`check-config`, `repro-summary`, `sim`, docs, `paths`) run without the gate.
 
 ## Response format
